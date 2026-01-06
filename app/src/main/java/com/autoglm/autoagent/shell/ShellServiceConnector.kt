@@ -33,6 +33,8 @@ class ShellServiceConnector @Inject constructor(
     private val CMD_INJECT_KEY = 3
     private val CMD_CAPTURE_SCREEN = 4
     private val CMD_CREATE_DISPLAY = 5
+    private val CMD_RELEASE_DISPLAY = 6
+    private val CMD_START_ACTIVITY = 7
     private val CMD_DESTROY = 99
 
     /**
@@ -116,13 +118,42 @@ class ShellServiceConnector @Inject constructor(
         }
     }
     
+    /**
+     * Create a VirtualDisplay for background execution
+     * @return displayId or -1 on failure
+     */
     fun createVirtualDisplay(name: String, width: Int, height: Int, density: Int): Int {
-        // Not implemented on server yet
-        return -1
+        return sendCommand(CMD_CREATE_DISPLAY) { out, input ->
+            out.writeUTF(name)
+            out.writeInt(width)
+            out.writeInt(height)
+            out.writeInt(density)
+            out.flush()
+            input.readInt()
+        } ?: -1
     }
     
-    fun releaseDisplay(displayId: Int) {
-        // Not implemented
+    /**
+     * Release a VirtualDisplay
+     */
+    fun releaseDisplay(displayId: Int): Boolean {
+        return sendCommand(CMD_RELEASE_DISPLAY) { out, input ->
+            out.writeInt(displayId)
+            out.flush()
+            input.readBoolean()
+        } ?: false
+    }
+    
+    /**
+     * Start an activity on specific display
+     */
+    fun startActivityOnDisplay(displayId: Int, packageName: String): Boolean {
+        return sendCommand(CMD_START_ACTIVITY) { out, input ->
+            out.writeInt(displayId)
+            out.writeUTF(packageName)
+            out.flush()
+            input.readBoolean()
+        } ?: false
     }
     
     fun destroy() {

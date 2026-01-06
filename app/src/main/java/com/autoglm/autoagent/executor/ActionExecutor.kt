@@ -42,18 +42,24 @@ interface ActionExecutor {
 class ShellActionExecutor(
     private val connector: ShellServiceConnector,
     private val screenWidth: Int,
-    private val screenHeight: Int
+    private val screenHeight: Int,
+    private var displayId: Int = 0  // 默认主屏幕，可设置为 VirtualDisplay
 ) : ActionExecutor {
     
     companion object {
         private const val TAG = "ShellActionExecutor"
     }
     
+    /** 设置目标 displayId（用于 VirtualDisplay） */
+    fun setDisplayId(id: Int) {
+        displayId = id
+    }
+    
     override suspend fun tap(x: Float, y: Float): Boolean = withContext(Dispatchers.IO) {
         try {
             // MotionEvent.ACTION_DOWN = 0, ACTION_UP = 1
-            val down = connector.injectTouch(0, 0, x.toInt(), y.toInt())
-            val up = connector.injectTouch(0, 1, x.toInt(), y.toInt())
+            val down = connector.injectTouch(displayId, 0, x.toInt(), y.toInt())
+            val up = connector.injectTouch(displayId, 1, x.toInt(), y.toInt())
             down && up
         } catch (e: Exception) {
             Log.e(TAG, "Tap failed", e)
@@ -64,9 +70,9 @@ class ShellActionExecutor(
     override suspend fun scroll(x1: Float, y1: Float, x2: Float, y2: Float): Boolean = withContext(Dispatchers.IO) {
         try {
             // 模拟滑动：ACTION_DOWN -> ACTION_MOVE -> ACTION_UP
-            val down = connector.injectTouch(0, 0, x1.toInt(), y1.toInt())
-            val move = connector.injectTouch(0, 2, x2.toInt(), y2.toInt()) // ACTION_MOVE = 2
-            val up = connector.injectTouch(0, 1, x2.toInt(), y2.toInt())
+            val down = connector.injectTouch(displayId, 0, x1.toInt(), y1.toInt())
+            val move = connector.injectTouch(displayId, 2, x2.toInt(), y2.toInt()) // ACTION_MOVE = 2
+            val up = connector.injectTouch(displayId, 1, x2.toInt(), y2.toInt())
             down && move && up
         } catch (e: Exception) {
             Log.e(TAG, "Scroll failed", e)
@@ -96,9 +102,9 @@ class ShellActionExecutor(
     override suspend fun longPress(x: Float, y: Float): Boolean = withContext(Dispatchers.IO) {
         try {
             // 长按：保持 DOWN 状态一段时间后 UP
-            val down = connector.injectTouch(0, 0, x.toInt(), y.toInt())
+            val down = connector.injectTouch(displayId, 0, x.toInt(), y.toInt())
             kotlinx.coroutines.delay(800)
-            val up = connector.injectTouch(0, 1, x.toInt(), y.toInt())
+            val up = connector.injectTouch(displayId, 1, x.toInt(), y.toInt())
             down && up
         } catch (e: Exception) {
             Log.e(TAG, "Long press failed", e)
@@ -201,6 +207,9 @@ class FallbackActionExecutor @Inject constructor(
     // 状态栏通知回调
     var onModeChanged: ((ExecutionMode, ExecutionMode) -> Unit)? = null
     
+    // VirtualDisplay 支持
+    private var currentDisplayId: Int = 0
+    
     /**
      * 初始化并检测可用的执行器
      */
@@ -208,6 +217,20 @@ class FallbackActionExecutor @Inject constructor(
         shellExecutor = ShellActionExecutor(connector, screenWidth, screenHeight)
         refreshMode()
     }
+    
+    /**
+     * 设置目标 displayId（用于 VirtualDisplay 后台执行）
+     */
+    fun setDisplayId(displayId: Int) {
+        currentDisplayId = displayId
+        shellExecutor?.setDisplayId(displayId)
+        Log.i(TAG, "DisplayId set to: $displayId")
+    }
+    
+    /**
+     * 获取当前 displayId
+     */
+    fun getDisplayId(): Int = currentDisplayId
     
     /**
      * 刷新当前模式

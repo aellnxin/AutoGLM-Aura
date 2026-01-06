@@ -47,20 +47,23 @@ class AgentRepository @Inject constructor(
     private val settingsRepository: SettingsRepository,
     private val voiceManager: VoiceManager,
     private val feedbackManager: com.autoglm.autoagent.utils.FeedbackToastManager,
-    private val decisionAgent: com.autoglm.autoagent.agent.DecisionAgent,
-    private val executionAgent: com.autoglm.autoagent.agent.ExecutionAgent,
-    private val fallbackExecutor: com.autoglm.autoagent.executor.FallbackActionExecutor
+    private val fallbackExecutor: com.autoglm.autoagent.executor.FallbackActionExecutor,
+    private val shellConnector: com.autoglm.autoagent.shell.ShellServiceConnector,
+    private val taskNotificationManager: com.autoglm.autoagent.utils.TaskNotificationManager,
+    private val dualModelAgent: com.autoglm.autoagent.agent.DualModelAgent,
+    private val shizukuManager: com.autoglm.autoagent.shizuku.ShizukuManager
 ) {
-    
-    // 双智能体模式标志
-    private var dualAgentMode = false
-    private val executedActions = mutableListOf<String>()
     
     // Scope for launching tasks from voice callback
     private val repositoryScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob())
     
     // Job to track current running task for immediate cancellation
     private var currentTaskJob: kotlinx.coroutines.Job? = null
+    
+    // VirtualDisplay 后台执行支持
+    private var virtualDisplayId: Int = 0
+    private var isBackgroundMode: Boolean = false
+    private var currentTaskName: String = ""
 
     fun setListening(isListening: Boolean) {
         if (isListening) {
@@ -71,12 +74,7 @@ class AgentRepository @Inject constructor(
                 voiceManager.voiceState.collect { vState ->
                     when (vState) {
                         is VoiceManager.VoiceState.Downloading -> {
-                            // Map Downloading to a visual state (can reuse Idle with message or add new state. Using Planning here as a busy indicator fallback, or stick to Idle with Toast)
-                             // Ideally we'd have a specific "Downloading" state, but for now let's just Log and maybe not block UI logic too much, or map Planning?
-                             // Let's use Idle but Log it? NO, UI needs to show progress.
-                             // Let's temporarily map Planning -> "Downloading Model ${vState.progress}%" if we could change text.
-                             // Simpler: Just rely on UI observing voiceManager directly? No, AgentRepository is the source of truth.
-                             // I will add a temporary state or reuse Planning.
+                            // ...
                         }
                         is VoiceManager.VoiceState.Initializing -> {
                             // Loading model
@@ -108,6 +106,52 @@ class AgentRepository @Inject constructor(
         }
     }
     
+    fun preloadVoiceModel() {
+        repositoryScope.launch {
+            voiceManager.preloadModel()
+        }
+    }
+    
+    /**
+     * 确保保活策略 (支持静默模式)
+     */
+    fun ensureKeepAlive(silent: Boolean = false) {
+        val packageName = context.packageName
+        
+        if (!silent) {
+            addUiMessage("system", "🛡️ [保活检查] 正在执行深度检测...")
+        }
+        
+        // Try Shizuku Automation
+        val status = shizukuManager.getActivationStatus()
+        
+        if (status == com.autoglm.autoagent.shizuku.ActivationStatus.ACTIVATED) {
+             val cmd = "cmd deviceidle whitelist +$packageName"
+             val result = shizukuManager.runCommand(cmd)
+             if (!silent) {
+                 if (result) {
+                     addUiMessage("system", "✅ [ADB] 已通过 Shizuku 自动添加电池白名单")
+                 } else {
+                     addUiMessage("system", "❌ [ADB] Shizuku 命令执行失败: $cmd")
+                 }
+             }
+        } else if (!silent) {
+             // Fallback Guide for manual
+             if (status == com.autoglm.autoagent.shizuku.ActivationStatus.NO_PERMISSION) {
+                 addUiMessage("system", "⚠️ [Shizuku] 检测到服务运行但未授权，正在请求...")
+                 shizukuManager.requestPermission()
+             }
+             
+             addUiMessage("system", "📝 [手动需知] 若无法自动执行，建议:")
+             addUiMessage("system", "1. 允许自启动 (手机管家 -> 权限 -> 自启动)")
+             addUiMessage("system", "2. 设置无限制 (长按图标 -> 应用信息 -> 省电策略 -> 无限制)")
+             addUiMessage("system", "3. ADB 命令 (复制执行):")
+             addUiMessage("system", "   cmd deviceidle whitelist +$packageName")
+        }
+    }
+    
+    fun logKeepAliveGuide() = ensureKeepAlive(silent = false)
+    
     fun setError(message: String) {
         _agentState.value = AgentState.Error(message)
     }
@@ -135,12 +179,6 @@ class AgentRepository @Inject constructor(
         voiceManager.cancelListening()
         if (_agentState.value == AgentState.Listening) {
              _agentState.value = AgentState.Idle
-        }
-    }
-    
-    fun preloadVoiceModel() {
-        repositoryScope.launch {
-            voiceManager.preloadModel()
         }
     }
     
@@ -174,9 +212,9 @@ class AgentRepository @Inject constructor(
         return """
 今天的日期是: $dateStr
 
-你是一个智能体分析专家，能够结合屏幕截图和结构化UI树来精准执行操作。每轮对话你会收到：
+你是一个智能体分析专家，能够结合屏幕截图来精准执行操作。每轮对话你会收到：
 1. 当前屏幕截图（视觉上下文）
-2. UI树（JSON格式，包含所有可交互元素的准确位置和属性）
+2. 当前App名称
 
 你必须严格按照要求输出以下格式：
 <think>{think}</think>
@@ -185,12 +223,6 @@ class AgentRepository @Inject constructor(
 其中：
 - {think} 是对你为什么选择这个操作的简短推理说明。
 - {action} 是本次执行的具体操作指令，必须严格遵循下方定义的指令格式。
-
-**重要：如何获取坐标**
-- UI树中每个元素都有 "b":[left,top,right,bottom] 字段，表示归一化坐标（范围0-999）
-- 点击时使用元素的中心点：center_x = (left+right)/2, center_y = (top+bottom)/2
-**执行优先级：如果UI树中存在目标元素（通过 "t"(text) 或 "d"(description) 匹配），
-优先使用该元素的 "b" 坐标执行操作，ui树中完全找不到目标元素时，请基于截图进行视觉定位**
 
 操作指令及其作用如下：
 - do(action="Launch", app="xxx")  
@@ -215,8 +247,6 @@ class AgentRepository @Inject constructor(
     Double Tap在屏幕上的特定点快速连续点按两次。使用此操作可以激活双击交互，如缩放、选择文本或打开项目。坐标系统从左上角 (0,0) 开始到右下角（999,999)结束。此操作完成后，您将自动收到结果状态的截图。
 - do(action="Take_over", message="xxx")  
     Take_over是接管操作，表示在登录和验证阶段需要用户协助。
-- do(action="GetUI")  
-    GetUI是获取当前全量UI树结构的操作。当你通过截图无法准确判断元素位置、状态（如按钮是否可点击）或者需要提取复杂列表文本时使用。此操作将返回一个 JSON 结构，包含屏幕上所有有效元素的 class、text、id、bounds 以及属性状态（如 selected、checked、focused）。
 - do(action="Back")  
     导航返回到上一个屏幕或关闭当前对话框。相当于按下 Android 的返回按钮。使用此操作可以从更深的屏幕返回、关闭弹出窗口或退出当前上下文。此操作完成后，您将自动收到结果状态的截图。
 - do(action="Home") 
@@ -255,6 +285,48 @@ class AgentRepository @Inject constructor(
         
         _agentState.value = AgentState.Running
         taskNotes.clear() // 任务开始前必须清空笔记
+        _chatMessages.value = emptyList() // 清空 UI 历史记录，确保新任务从 Step 1 开始显示
+        currentTaskName = goal  // 记录任务名称用于通知
+        
+        // ===== 检查 Agent 模式：DEEP 使用双模型 =====
+        val agentMode = settingsRepository.getAgentMode()
+        if (agentMode == com.autoglm.autoagent.agent.AgentMode.DEEP) {
+            addUiMessage("system", "🧠 思考模式启动 (大模型规划 + 小模型执行)")
+            try {
+                if (!dualModelAgent.canExecute()) {
+                    _agentState.value = AgentState.Error("大模型或小模型不可用，请检查 API 配置")
+                    addUiMessage("system", "❌ 双模型不可用")
+                    delay(TimingConfig.Task.ERROR_DELAY)
+                    stopAgent()
+                    return
+                }
+                
+                val result = dualModelAgent.startTask(goal)
+                when (result) {
+                    is com.autoglm.autoagent.agent.TaskResult.Success -> {
+                        addUiMessage("system", "✅ 任务完成: ${result.message}")
+                        feedbackManager.notifyTaskCompleted(result.message)
+                        taskNotificationManager.notifyTaskComplete(currentTaskName, result.message)
+                    }
+                    is com.autoglm.autoagent.agent.TaskResult.Error -> {
+                        addUiMessage("system", "❌ 任务失败: ${result.error}")
+                        _agentState.value = AgentState.Error(result.error)
+                    }
+                    is com.autoglm.autoagent.agent.TaskResult.Cancelled -> {
+                        addUiMessage("system", "任务已取消")
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("Agent", "DualModelAgent 执行失败", e)
+                _agentState.value = AgentState.Error(e.message ?: "未知错误")
+                addUiMessage("system", "❌ 错误: ${e.message}")
+            } finally {
+                _agentState.value = AgentState.Idle
+            }
+            return // DEEP 模式提前返回，不走下面的 TURBO 流程
+        }
+        
+        // ===== 以下是 TURBO 模式（原有整个流程） =====
         
         // ===== 执行前权限和服务检查 =====
         val checkResult = checkPrerequisites()
@@ -266,6 +338,48 @@ class AgentRepository @Inject constructor(
             return
         }
         addUiMessage("system", "✅ 权限检查通过,开始执行任务...")
+        
+        // ===== 1. 创建 VirtualDisplay (后台模式) =====
+        if (shellConnector.connect()) {
+            val width = defaultScreenWidth
+            val height = defaultScreenHeight
+            val density = context.resources.displayMetrics.densityDpi
+            
+            val displayId = shellConnector.createVirtualDisplay("AutoDroid-Agent", width, height, density)
+            if (displayId > 0) {
+                virtualDisplayId = displayId
+                isBackgroundMode = true
+                addUiMessage("system", "🖥️ VirtualDisplay Created (ID: $displayId)")
+                Log.i("Agent", "Created VirtualDisplay: $displayId")
+                
+                // 设置执行器目标 Display
+                fallbackExecutor.setDisplayId(displayId)
+                
+                // ===== 2. 尝试识别并启动目标 App =====
+                // 自动识别并启动目标 App
+                val targetApp = appManager.findAppInText(goal)
+                
+                if (targetApp != null) {
+                    addUiMessage("system", "🚀 Launching: $targetApp on Display $displayId")
+                    val launched = appManager.launchApp(targetApp, displayId)
+                    if (launched) {
+                        // 等待应用启动
+                        delay(3000)
+                    } else {
+                        addUiMessage("system", "⚠️ Failed to launch $targetApp")
+                    }
+                } else {
+                    addUiMessage("system", "ℹ️ 未识别到具体应用，将直接在 VirtualDisplay 操作")
+                }
+            } else {
+                addUiMessage("system", "⚠️ 创建 VirtualDisplay 失败，降级到主屏幕")
+                fallbackExecutor.setDisplayId(0)
+            }
+        } else {
+            addUiMessage("system", "⚠️ Shell 服务未连接，运行在主屏幕")
+             fallbackExecutor.setDisplayId(0)
+        }
+        
         // ===== 检查完成 =====
         
         // ===== 初始化执行器 =====
@@ -303,41 +417,7 @@ class AgentRepository @Inject constructor(
         messages.add(ChatMessage("system", getSystemPrompt()))
         
         val taskGoal = "Task: $goal"
-        
-        // === 检查双智能体可用性 ===
-        val decisionAvailable = decisionAgent.checkAvailability()
-        val executionAvailable = executionAgent.checkAvailability()
-        
-        dualAgentMode = decisionAvailable && executionAvailable
-        executedActions.clear()
-        
-        if (dualAgentMode) {
-            Log.d("Agent", "✅ 双智能体模式：DecisionAgent(ZHIPU) + ExecutionAgent(EDGE)")
-            feedbackManager.show("🤖 双智能体模式启动", android.widget.Toast.LENGTH_SHORT)
-        } else if (decisionAvailable) {
-            Log.d("Agent", "⚠️ 降级模式：仅 DecisionAgent 可用")
-            feedbackManager.show("⚠️ 单模型模式（决策）", android.widget.Toast.LENGTH_SHORT)
-        } else if (executionAvailable) {
-            Log.d("Agent", "⚠️ 降级模式：仅 ExecutionAgent 可用")
-            feedbackManager.show("⚠️ 单模型模式（执行）", android.widget.Toast.LENGTH_SHORT)
-        } else {
-            Log.e("Agent", "❌ 双智能体均不可用，无法执行任务")
-            feedbackManager.show("❌ 无可用模型", android.widget.Toast.LENGTH_LONG)
-            stopAgent()
-            return
-        }
-        
-        // === 任务规划（如果 DecisionAgent 可用）===
-        var taskPlan: com.autoglm.autoagent.agent.TaskPlan? = null
-        if (decisionAvailable) {
-            try {
-                taskPlan = decisionAgent.analyzeTask(goal)
-                Log.d("Agent", "📋 任务计划：${taskPlan.summary}")
-                feedbackManager.show("📋 ${taskPlan.summary}", android.widget.Toast.LENGTH_SHORT)
-            } catch (e: Exception) {
-                Log.e("Agent", "任务规划失败，继续执行", e)
-            }
-        }
+        messages.add(ChatMessage("user", taskGoal))  // 关键：让 AI 知道任务目标
         
         addUiMessage("user", taskGoal)
         feedbackManager.show("🚀 任务开始: $goal")
@@ -356,94 +436,93 @@ class AgentRepository @Inject constructor(
                 if (_agentState.value == AgentState.Idle) break
                 stepsCount++
                 
-                addUiMessage("system", "Step $stepsCount thinking...")
+                // addUiMessage("system", "Step $stepsCount thinking...") -> Removed as per user request
+
 
                 // 1. 获取当前状态
                 feedbackManager.cancelForScreenshot()
                 kotlinx.coroutines.delay(150)
                 
                 val currentApp = AutoAgentService.instance?.currentPackageName ?: "Unknown"
-                val uiTreeJson = AutoAgentService.instance?.dumpOptimizedUiTree() ?: "{\"ui\": []}"
+                // 纯视觉模式：不注入 UI 树
                 
-                // 截图（异常时或降级时使用）
+                // 截图
                 var screenshotBase64: String? = null
                 var currentScreenWidth = defaultScreenWidth
                 var currentScreenHeight = defaultScreenHeight
                 
-                val needsScreenshot = isDeadlockState || !dualAgentMode
-                if (needsScreenshot) {
-                    val screenshot = captureScreenshot()
-                    screenshotBase64 = screenshot?.base64
-                    currentScreenWidth = screenshot?.width ?: defaultScreenWidth
-                    currentScreenHeight = screenshot?.height ?: defaultScreenHeight
-                }
+                val screenshot = captureScreenshot()
+                screenshotBase64 = screenshot?.base64
+                currentScreenWidth = screenshot?.width ?: defaultScreenWidth
+                currentScreenHeight = screenshot?.height ?: defaultScreenHeight
                 
-                // 2. 决策 (根据模式)
+                // 2. 调用 AI 决策
                 var actionStr: String
                 
                 try {
-                    if (dualAgentMode) {
-                        // === 双智能体协作模式 ===
-                        // 2.1 DecisionAgent 决策
-                        val decision = decisionAgent.makeDecision(uiTreeJson, currentApp, screenshotBase64)
-                        Log.d("Agent", "🧠 决策：${decision.action} -> ${decision.target}")
-                        
-                        if (decision.finished) {
-                            Log.i("Agent", "✅ DecisionAgent 判定任务完成")
-                            addUiMessage("system", "任务已完成！")
-                            delay(TimingConfig.Task.FINISH_DELAY)
-                            stopAgent()
-                            return
-                        }
-                        
-                        // 2.2 ExecutionAgent 解析为操作
-                        actionStr = executionAgent.resolveAction(decision, uiTreeJson)
-                        executedActions.add("${decision.action}: ${decision.target}")
-                        
-                    } else if (decisionAgent.checkAvailability()) {
-                        // === 降级模式：仅 DecisionAgent ===
-                        val decision = decisionAgent.makeDecision(uiTreeJson, currentApp, screenshotBase64)
-                        Log.d("Agent", "⚠️ 单模型（决策）：${decision.action}")
-                        
-                        if (decision.finished) {
-                            stopAgent()
-                            return
-                        }
-                        
-                        // 直接转换为 action (无 ExecutionAgent 辅助)
-                        actionStr = convertDecisionToAction(decision)
-                        executedActions.add(actionStr)
-                        
-                    } else if (executionAgent.checkAvailability()) {
-                        // === 降级模式：仅 ExecutionAgent ===
-                        actionStr = executionAgent.executeIndependently(goal, uiTreeJson, currentApp)
-                        Log.d("Agent", "⚠️ 单模型（执行）：$actionStr")
-                        executedActions.add(actionStr)
-                        
-                    } else {
-                        Log.e("Agent", "❌ 双智能体均不可用")
-                        stopAgent()
-                        return
+                    // 构建用户消息（截图 + 当前状态）
+                    val userContent = mutableListOf<ContentPart>()
+                    
+                    // 添加截图
+                    if (screenshotBase64 != null) {
+                        userContent.add(ContentPart(
+                            type = "image_url",
+                            image_url = ImageUrl("data:image/png;base64,$screenshotBase64")
+                        ))
                     }
+                    
+                    // 添加文本信息（包含步骤编号）
+                    val textContent = buildString {
+                        append("=== Step $stepsCount ===\n")
+                        append("Current App: $currentApp\n")
+                        if (taskNotes.isNotEmpty()) {
+                            append("\nNotes:\n")
+                            taskNotes.forEach { append("- $it\n") }
+                        }
+                        append("\n请根据截图决定下一步操作，继续完成任务。")
+                    }
+                    userContent.add(ContentPart(type = "text", text = textContent))
+                    
+                    // 移除历史截图保留文本
+                    stripPreviousImages()
+                    
+                    // 添加用户消息
+                    messages.add(ChatMessage("user", userContent))
+                    
+                    // 调用 AI
+                    val response = aiClient.sendMessage(messages)
+                    val content = response.content ?: ""
+                    messages.add(ChatMessage("assistant", content))
+                    
+                    // 解析响应
+                    val (think, action) = parseResponse(content)
+                    if (think.isNotBlank()) {
+                        addUiMessage("assistant", "💭 $think")
+                    }
+                    actionStr = action
                     
                 } catch (e: Exception) {
-                    Log.e("Agent", "决策失败，尝试降级", e)
-                    
-                    // 异常降级策略
-                    if (dualAgentMode && executionAgent.checkAvailability()) {
-                        Log.w("Agent", "降级到 ExecutionAgent 独立模式")
-                        dualAgentMode = false
-                        actionStr = executionAgent.executeIndependently(goal, uiTreeJson, currentApp)
-                    } else {
-                        throw e
-                    }
+                    Log.e("Agent", "AI 调用失败", e)
+                    throw e
                 }
+
                 
                 // 3. 执行操作
                 if (actionStr.contains("finish(")) {
                     Log.i("Agent", "✅ 收到完成指令")
                     addUiMessage("system", "任务已完成！")
                     feedbackManager.notifyTaskCompleted("任务已完成")
+                    
+                    // 发送系统通知（后台模式下尤其重要）
+                    taskNotificationManager.notifyTaskComplete(currentTaskName, "任务已成功完成")
+                    
+                    // 清理 VirtualDisplay
+                    if (virtualDisplayId > 0) {
+                        shellConnector.releaseDisplay(virtualDisplayId)
+                        virtualDisplayId = 0
+                        isBackgroundMode = false
+                    }
+                    
                     delay(TimingConfig.Task.FINISH_DELAY)
                     stopAgent()
                     return
@@ -542,26 +621,18 @@ class AgentRepository @Inject constructor(
      * @return Pair<成功, 错误信息>
      */
     private fun checkPrerequisites(): Pair<Boolean, String> {
-        // 1. 检查 AccessibilityService
-        if (AutoAgentService.instance == null) {
-            return Pair(false, "无障碍服务未启用\n请在系统设置中启用 AutoGLM 无障碍服务")
+        // 1. 检查控制权限 (无障碍 或 Shell)
+        val hasAccessibility = AutoAgentService.instance != null
+        val hasShell = try { shellConnector.connect() } catch (e: Exception) { false }
+        
+        if (!hasAccessibility && !hasShell) {
+            return Pair(false, "服务未就绪\n请开启无障碍服务 或 激活 Shell 服务(高级模式)")
         }
         
-        // 2. 检查截图功能
-        // API 30+ 使用 AccessibilityService.takeScreenshot (无需额外权限)
-        // API < 30 需要 MediaProjection (ScreenCaptureService)
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-            // API 30+: 无障碍服务已经足够
-            Log.d("Agent", "✅ 使用 AccessibilityService 截图 (API ${android.os.Build.VERSION.SDK_INT})")
-        } else {
-            // API < 30: 需要 MediaProjection
-            if (ScreenCaptureService.instance == null) {
-                return Pair(false, "截图服务未启动\n请在应用内授予录屏权限\n(API ${android.os.Build.VERSION.SDK_INT} < 30)")
-            }
-            Log.d("Agent", "✅ 使用 MediaProjection 截图 (API ${android.os.Build.VERSION.SDK_INT})")
-        }
+        // 用户反馈：有无障碍或Shell权限时，不需要额外检查截图权限(MediaProjection)
+        // 系统会自动降级或使用现有能力
         
-        // 3. 检查 AI 配置
+        // 2. 检查 AI 配置
         val config = settingsRepository.config.value
         if (config.baseUrl.isBlank() || config.apiKey.isBlank()) {
             return Pair(false, "AI 配置未完成\n请在设置中配置 API URL 和 API Key")
@@ -926,6 +997,13 @@ class AgentRepository @Inject constructor(
     }
     
     /**
+     * 公开的添加 UI 消息方法，供 DualModelAgent 等外部组件调用
+     */
+    fun logMessage(role: String, content: String) {
+        addMessage(role, content)
+    }
+    
+    /**
      * 从最后一条 user 消息中移除图片,仅保留文本
      * 匹配 Python: self._context[-1] = MessageBuilder.remove_images_from_message(self._context[-1])
      */
@@ -971,36 +1049,54 @@ class AgentRepository @Inject constructor(
 
 
     // 辅助方法：截图
+    // 辅助方法：截图
     private suspend fun captureScreenshot(): ScreenshotData? {
         val accessibilityService = AutoAgentService.instance
-        return if (accessibilityService != null && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+        
+        // 1. 优先使用无障碍服务 (API 30+，无需额外权限)
+        if (accessibilityService != null && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
             val bitmap = accessibilityService.takeScreenshotAsync()
             if (bitmap != null) {
-                val stream = java.io.ByteArrayOutputStream()
-                bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, stream)
-                val byteArray = stream.toByteArray()
-                val base64 = android.util.Base64.encodeToString(byteArray, android.util.Base64.NO_WRAP)
-                val result = ScreenshotData(base64, bitmap.width, bitmap.height)
-                bitmap.recycle()
-                result
-            } else null
-        } else {
-            ScreenCaptureService.instance?.captureSnapshot()
+                return processBitmap(bitmap)
+            }
         }
+        
+        // 2. 尝试 Shell 服务 (高级模式，无需额外权限)
+        try {
+            // 注意：connect() 是为了检查可用性，实际截图依赖 shellConnector 的实现
+            // 这里假设 connect() 开销不大或者已经保持连接
+            if (shellConnector.connect()) {
+                val path = shellConnector.captureScreen(0)
+                if (!path.isNullOrEmpty()) {
+                    // 尝试读取文件 (Shell Service 需要将文件保存在应用可读的位置，如 sdcard)
+                    val bitmap = android.graphics.BitmapFactory.decodeFile(path)
+                    if (bitmap != null) {
+                        Log.d("Agent", "✅ Shell screenshot success: $path")
+                        return processBitmap(bitmap)
+                    } else {
+                         Log.w("Agent", "❌ Shell screenshot captured but decode failed (Permission issue?): $path")
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("Agent", "Shell screenshot attempt failed", e)
+        }
+        
+        // 3. 最后尝试 MediaProjection (旧版/降级，需要录屏权限)
+        return ScreenCaptureService.instance?.captureSnapshot()
     }
-
-    // 辅助方法：将 Decision 转换为 Action 字符串（降级时使用）
-    private fun convertDecisionToAction(decision: com.autoglm.autoagent.agent.Decision): String {
-        return when (decision.action.lowercase()) {
-            "tap", "click" -> "do(action=\"Tap\", element=${decision.target})"
-            "type", "input" -> "do(action=\"Type\", text=\"${decision.target}\")"
-            "back" -> "do(action=\"Back\")"
-            "home" -> "do(action=\"Home\")"
-            "finish" -> "finish(message=\"完成\")"
-            else -> "do(action=\"Tap\", element=[500,500])"
-        }
+    
+    private fun processBitmap(bitmap: android.graphics.Bitmap): ScreenshotData {
+        val stream = java.io.ByteArrayOutputStream()
+        bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, stream)
+        val byteArray = stream.toByteArray()
+        val base64 = android.util.Base64.encodeToString(byteArray, android.util.Base64.NO_WRAP)
+        val result = ScreenshotData(base64, bitmap.width, bitmap.height)
+        bitmap.recycle()
+        return result
     }
 }
+
 
 data class ScreenshotData(
     val base64: String,

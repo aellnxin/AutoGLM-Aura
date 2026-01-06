@@ -142,4 +142,36 @@ class SettingsRepository @Inject constructor(
             emptyMap()
         }
     }
+    
+    // ==================== Agent 模式设置 ====================
+    
+    private val _agentMode = MutableStateFlow(loadAgentMode())
+    val agentMode: StateFlow<com.autoglm.autoagent.agent.AgentMode> = _agentMode.asStateFlow()
+    
+    /**
+     * 加载 Agent 执行模式
+     */
+    private fun loadAgentMode(): com.autoglm.autoagent.agent.AgentMode {
+        val modeStr = oldPrefs.getString("agent_mode", com.autoglm.autoagent.agent.AgentMode.TURBO.name)
+            ?: com.autoglm.autoagent.agent.AgentMode.TURBO.name
+        return try {
+            com.autoglm.autoagent.agent.AgentMode.valueOf(modeStr)
+        } catch (e: Exception) {
+            com.autoglm.autoagent.agent.AgentMode.TURBO
+        }
+    }
+    
+    /**
+     * 保存 Agent 执行模式
+     */
+    fun saveAgentMode(mode: com.autoglm.autoagent.agent.AgentMode) {
+        oldPrefs.edit().putString("agent_mode", mode.name).apply()
+        _agentMode.value = mode
+    }
+    
+    /**
+     * 获取当前 Agent 模式
+     */
+    fun getAgentMode(): com.autoglm.autoagent.agent.AgentMode = _agentMode.value
 }
+

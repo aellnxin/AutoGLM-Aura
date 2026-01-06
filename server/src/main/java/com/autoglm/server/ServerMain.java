@@ -34,6 +34,8 @@ public class ServerMain {
     private static final int CMD_INJECT_KEY = 3;
     private static final int CMD_CAPTURE_SCREEN = 4;
     private static final int CMD_CREATE_DISPLAY = 5;
+    private static final int CMD_RELEASE_DISPLAY = 6;
+    private static final int CMD_START_ACTIVITY = 7;
     private static final int CMD_DESTROY = 99;
     
     public static void main(String[] args) {
@@ -148,6 +150,34 @@ public class ServerMain {
                     int displayId = in.readInt();
                     String path = ReflectionHelper.captureScreenToFile(displayId);
                     out.writeUTF(path != null ? path : "");
+                    out.flush();
+                    break;
+                }
+                
+                case CMD_CREATE_DISPLAY: {
+                    String name = in.readUTF();
+                    int width = in.readInt();
+                    int height = in.readInt();
+                    int density = in.readInt();
+                    int displayId = ReflectionHelper.createVirtualDisplay(name, width, height, density);
+                    out.writeInt(displayId);
+                    out.flush();
+                    break;
+                }
+                
+                case CMD_RELEASE_DISPLAY: {
+                    int displayId = in.readInt();
+                    boolean result = ReflectionHelper.releaseVirtualDisplay(displayId);
+                    out.writeBoolean(result);
+                    out.flush();
+                    break;
+                }
+                
+                case CMD_START_ACTIVITY: {
+                    int displayId = in.readInt();
+                    String packageName = in.readUTF();
+                    boolean result = ReflectionHelper.startActivityOnDisplay(displayId, packageName);
+                    out.writeBoolean(result);
                     out.flush();
                     break;
                 }

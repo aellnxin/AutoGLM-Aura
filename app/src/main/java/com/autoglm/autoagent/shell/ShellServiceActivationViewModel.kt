@@ -36,7 +36,8 @@ class ShellServiceActivationViewModel @Inject constructor(
     private val deployer: ShellServiceDeployer,
     private val connector: ShellServiceConnector,
     private val adbLauncher: AdbServiceLauncher,
-    private val shizukuManager: ShizukuManager
+    private val shizukuManager: ShizukuManager,
+    private val agentRepository: com.autoglm.autoagent.data.AgentRepository
 ) : ViewModel() {
     
     private val _state = MutableStateFlow(ShellActivationUiState())
@@ -82,6 +83,10 @@ class ShellServiceActivationViewModel @Inject constructor(
             
             val status = shizukuManager.getActivationStatus()
             if (status == ActivationStatus.ACTIVATED) {
+                // 1. 先尝试静默保活注入 (不需要 UI 输出)
+                agentRepository.ensureKeepAlive(silent = true)
+                
+                // 2. 启动服务逻辑
                 val command = deployer.getActivationCommand()
                 val success = withContext(Dispatchers.IO) {
                     shizukuManager.runCommand(command)

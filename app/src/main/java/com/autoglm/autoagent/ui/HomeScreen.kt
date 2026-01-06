@@ -20,6 +20,8 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.onClick
@@ -35,6 +37,7 @@ import com.autoglm.autoagent.data.*
 import com.autoglm.autoagent.data.api.ChatMessage
 import com.autoglm.autoagent.ui.components.AnimatedGlowingCircle
 import com.autoglm.autoagent.ui.theme.*
+import com.autoglm.autoagent.utils.KeepAliveUtils
 import android.content.Context
 import android.content.Intent
 import android.provider.Settings
@@ -49,11 +52,17 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+// ... (imports)
+import android.graphics.BitmapFactory
+import android.util.Base64
+import androidx.compose.ui.graphics.asImageBitmap
+import com.autoglm.autoagent.data.api.ContentPart
 
 data class LogEntry(
     val timestamp: Long,
     val type: LogType,
-    val content: String
+    val content: String,
+    val imageBase64: String? = null // Added for screenshot support
 )
 
 enum class LogType {
@@ -63,6 +72,7 @@ enum class LogType {
 @HiltViewModel
 class HomeViewModel @Inject constructor(
     private val agentRepository: AgentRepository,
+    private val dualModelAgent: com.autoglm.autoagent.agent.DualModelAgent,
     @ApplicationContext private val context: Context
 ) : ViewModel() {
     
@@ -104,6 +114,15 @@ class HomeViewModel @Inject constructor(
                  agentRepository.addMessage("system", "❌ [服务连接] 断开 (等待开启)")
              }
         }
+        
+        // 3. KeepAlive Status (Battery Optimization)
+        if (!KeepAliveUtils.isIgnoringBatteryOptimizations(context)) {
+             agentRepository.addMessage("system", "⚠️ [电池优化] 受限 (可能被杀)")
+             agentRepository.addMessage("system", "👉 正在请求忽略电池优化...")
+             KeepAliveUtils.requestIgnoreBatteryOptimizations(context)
+        } else {
+             agentRepository.addMessage("system", "✅ [电池优化] 已忽略 (无限制)")
+        }
     }
     
     // 监听AgentRepository的消息
@@ -135,16 +154,38 @@ class HomeViewModel @Inject constructor(
         .map { messages ->
             messages.filter { it.role == "user" || it.role == "assistant" || it.role == "system" }
                 .mapNotNull { msg ->
-                    val content = when (val c = msg.content) {
-                        is String -> c
-                        is List<*> -> "分析截屏中..."
-                        else -> c.toString()
+                    var contentText = ""
+                    var imageBase64: String? = null
+
+                    when (val c = msg.content) {
+                        is String -> contentText = c
+                        is List<*> -> {
+                            // Handle Multi-modal content
+                            val parts = c as? List<*>
+                            parts?.forEach { part ->
+                                if (part is ContentPart) {
+                                    if (part.type == "text") {
+                                        contentText += (part.text ?: "") + "\n"
+                                    } else if (part.type == "image_url") {
+                                        // "data:image/png;base64,..."
+                                        val url = part.image_url?.url ?: ""
+                                        if (url.startsWith("data:image")) {
+                                            imageBase64 = url.substringAfter("base64,")
+                                        }
+                                    }
+                                }
+                            }
+                            if (contentText.isBlank() && imageBase64 != null) {
+                                contentText = "[截图已捕获]"
+                            }
+                        }
+                        else -> contentText = c.toString()
                     }
                     
                     val type = when {
-                        msg.role == "user" && content.startsWith("Task:") -> LogType.USER_COMMAND
+                        msg.role == "user" && contentText.startsWith("Task:") -> LogType.USER_COMMAND
                         msg.role == "assistant" -> LogType.AI_ACTION
-                        msg.role == "system" && (content.contains("Step") || content.contains("Error")) -> LogType.AI_ACTION
+                        msg.role == "system" && (contentText.contains("Step") || contentText.contains("Error")) -> LogType.AI_ACTION
                         else -> null
                     }
                     
@@ -152,7 +193,8 @@ class HomeViewModel @Inject constructor(
                         LogEntry(
                             timestamp = System.currentTimeMillis(),
                             type = type,
-                            content = content.removePrefix("Task: ").removePrefix("Think: ").removePrefix("Action: ")
+                            content = contentText.removePrefix("Task: ").removePrefix("Think: ").removePrefix("Action: ").trim(),
+                            imageBase64 = imageBase64
                         )
                     } else null
                 }
@@ -217,7 +259,20 @@ class HomeViewModel @Inject constructor(
              agentRepository.cancelListening()
         }
         agentRepository.stopAgent()
+        dualModelAgent.stop()
         _isLoading.value = false
+    }
+    
+    // 规划确认相关
+    val pendingPlan = dualModelAgent.pendingPlan
+    val planCountdown = dualModelAgent.planCountdown
+    
+    fun confirmPlan() {
+        dualModelAgent.confirmPlan()
+    }
+    
+    fun cancelPlan() {
+        dualModelAgent.cancelPlan()
     }
 }
 
@@ -236,6 +291,10 @@ fun HomeScreen(
     val showTextInput by viewModel.showTextInput.collectAsState()
     val agentState by viewModel.agentState.collectAsState()
     val isRecording = agentState is AgentState.Listening
+    
+    // 规划确认状态
+    val pendingPlan by viewModel.pendingPlan.collectAsState()
+    val planCountdown by viewModel.planCountdown.collectAsState()
 
     // Root Container with Particle Background
     Box(
@@ -513,6 +572,16 @@ fun HomeScreen(
                  onDismiss = { viewModel.toggleTextInput() }
             )
         }
+        
+        // 规划确认弹窗
+        pendingPlan?.let { plan ->
+            PlanConfirmationSheet(
+                plan = plan,
+                countdown = planCountdown,
+                onConfirm = { viewModel.confirmPlan() },
+                onCancel = { viewModel.cancelPlan() }
+            )
+        }
     }
 }
 // Dependent sub-components (LogSheet, TextInputSheet, LogItem) remain unchanged...
@@ -521,28 +590,181 @@ fun HomeScreen(
 
 @Composable
 fun LogSheet(logs: List<LogEntry>, onDismiss: () -> Unit) {
-     Box(
-        modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha=0.7f)).clickable { onDismiss() },
+    // 展开状态：false=半屏(350dp), true=全屏
+    var isExpanded by remember { mutableStateOf(false) }
+    
+    // 使用屏幕高度计算
+    val configuration = androidx.compose.ui.platform.LocalConfiguration.current
+    val screenHeight = configuration.screenHeightDp.dp
+    
+    // 高度动画 - 平滑过渡
+    val sheetHeight by animateDpAsState(
+        targetValue = if (isExpanded) screenHeight else 350.dp,
+        animationSpec = spring(dampingRatio = 0.7f, stiffness = 400f),
+        label = "sheet_height"
+    )
+    
+    // 背景遮罩动画
+    val backdropAlpha by animateFloatAsState(
+        targetValue = if (isExpanded) 0.85f else 0.6f,
+        animationSpec = tween(200),
+        label = "backdrop"
+    )
+    
+    // 追踪手势累积量（用于判断方向）
+    var accumulatedDrag by remember { mutableStateOf(0f) }
+    
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = backdropAlpha))
+            .clickable(
+                interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                indication = null
+            ) { 
+                if (!isExpanded) onDismiss() 
+            },
         contentAlignment = Alignment.BottomCenter
     ) {
-         com.autoglm.autoagent.ui.components.GlassCard(
-            modifier = Modifier.fillMaxWidth().height(400.dp).clickable(enabled=false){},
-            shape = RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp),
+        com.autoglm.autoagent.ui.components.GlassCard(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(sheetHeight)
+                .clickable(enabled = false) {}, // 阻止点击穿透
+            shape = if (isExpanded) 
+                RoundedCornerShape(0.dp) 
+            else 
+                RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
             backgroundColor = DarkSurface
         ) {
-             Column(modifier = Modifier.padding(24.dp)) {
-                 Text("指令历史", style = MaterialTheme.typography.headlineMedium)
-                 Spacer(modifier = Modifier.height(16.dp))
-                  androidx.compose.foundation.lazy.LazyColumn {
-                    items(logs.size) { index ->
-                        LogItem(logs[index])
-                        Spacer(modifier = Modifier.height(12.dp))
+            Column(modifier = Modifier.fillMaxSize()) {
+                // ===== 可拖动的手柄区域 =====
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .pointerInput(isExpanded) {
+                            detectVerticalDragGestures(
+                                onDragStart = {
+                                    accumulatedDrag = 0f
+                                },
+                                onDragEnd = {
+                                    // 根据累积拖动量决定行为
+                                    val threshold = 80f
+                                    when {
+                                        accumulatedDrag > threshold -> {
+                                            // 下拉：如果全屏则收起，否则关闭
+                                            if (isExpanded) {
+                                                isExpanded = false
+                                            } else {
+                                                onDismiss()
+                                            }
+                                        }
+                                        accumulatedDrag < -threshold -> {
+                                            // 上拉：展开全屏
+                                            isExpanded = true
+                                        }
+                                    }
+                                    accumulatedDrag = 0f
+                                },
+                                onVerticalDrag = { _, dragAmount ->
+                                    accumulatedDrag += dragAmount
+                                }
+                            )
+                        }
+                        .padding(horizontal = 24.dp, vertical = 12.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        // 拖动手柄
+                        Box(
+                            modifier = Modifier
+                                .width(48.dp)
+                                .height(5.dp)
+                                .clip(RoundedCornerShape(2.5.dp))
+                                .background(TextSecondary.copy(alpha = 0.5f))
+                        )
+                        
+                        Spacer(modifier = Modifier.height(16.dp))
+                        
+                        // 标题行
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "执行日志",
+                                style = MaterialTheme.typography.titleLarge,
+                                color = TextPrimary,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            
+                            // 提示文字
+                            Text(
+                                if (isExpanded) "↓ 下拉收起" else "↑ 上拉展开",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = TextSecondary.copy(alpha = 0.5f)
+                            )
+                        }
                     }
                 }
-             }
+                
+                // 分隔线
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(1.dp)
+                        .background(Color.White.copy(alpha = 0.08f))
+                )
+                
+                // ===== 日志内容列表 =====
+                // 计算步骤编号
+                val logsWithSteps = remember(logs) {
+                    var counter = 0
+                    logs.map { log ->
+                        val step = if (log.type == LogType.AI_ACTION) ++counter else 0
+                        log to step
+                    }
+                }
+                
+                if (logs.isEmpty()) {
+                    // 空状态
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(24.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            "暂无日志",
+                            color = TextSecondary.copy(alpha = 0.5f),
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                } else {
+                    androidx.compose.foundation.lazy.LazyColumn(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                            top = 12.dp,
+                            bottom = 24.dp
+                        )
+                    ) {
+                        items(logsWithSteps.size) { index ->
+                            val (log, step) = logsWithSteps[index]
+                            LogItemCard(log, stepNumber = step)
+                        }
+                    }
+                }
+            }
         }
     }
 }
+
 
 @Composable
 fun TextInputSheet(onSend: (String) -> Unit, onDismiss: () -> Unit) {
@@ -593,3 +815,257 @@ fun LogItem(log: LogEntry) {
     }
 }
 
+/** 卡片化的日志项，带步骤编号 */
+/** 卡片化的日志项，带步骤编号 */
+@Composable
+fun LogItemCard(log: LogEntry, stepNumber: Int) {
+    val isUser = log.type == LogType.USER_COMMAND
+    
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        contentAlignment = if (isUser) Alignment.CenterEnd else Alignment.CenterStart
+    ) {
+        com.autoglm.autoagent.ui.components.GlassCard(
+            modifier = Modifier.widthIn(max = 300.dp),
+            shape = if (isUser) 
+                RoundedCornerShape(16.dp, 2.dp, 16.dp, 16.dp) 
+            else 
+                RoundedCornerShape(2.dp, 16.dp, 16.dp, 16.dp),
+            backgroundColor = if (isUser) 
+                PrimaryBlue.copy(alpha = 0.2f) 
+            else 
+                Color.White.copy(alpha = 0.05f),
+            borderColor = if (isUser)
+                PrimaryBlue.copy(alpha = 0.4f)
+            else
+                Color.White.copy(alpha = 0.1f)
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                // Header Row: Step Number (Only for AI)
+                if (!isUser && stepNumber > 0) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        // 步骤编号圆圈
+                        Box(
+                            modifier = Modifier
+                                .size(20.dp)
+                                .clip(CircleShape)
+                                .background(PrimaryCyan.copy(alpha = 0.2f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "$stepNumber",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = PrimaryCyan,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 10.sp
+                            )
+                        }
+                        
+                        Spacer(modifier = Modifier.width(8.dp))
+                        
+                        // AI Role Label
+                        Text(
+                            text = "AutoAgent",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextSecondary.copy(alpha = 0.7f),
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+                
+                // Content Row (Image + Text)
+                // 如果有图片，显示
+                if (log.imageBase64 != null) {
+                    val bitmap = remember(log.imageBase64) {
+                        try {
+                            val decodedString = Base64.decode(log.imageBase64, Base64.DEFAULT)
+                            BitmapFactory.decodeByteArray(decodedString, 0, decodedString.size)?.asImageBitmap()
+                        } catch (e: Exception) {
+                            null
+                        }
+                    }
+                    
+                    if (bitmap != null) {
+                        androidx.compose.foundation.Image(
+                            bitmap = bitmap,
+                            contentDescription = "Screenshot",
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 200.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color.Black),
+                            contentScale = androidx.compose.ui.layout.ContentScale.Fit
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+                }
+                
+                // Text Content
+                val displayContent = log.content.trim()
+                if (displayContent.isNotBlank()) {
+                    Text(
+                        text = displayContent,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextPrimary.copy(alpha = 0.9f),
+                        lineHeight = 20.sp
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 规划确认弹窗
+ */
+@Composable
+fun PlanConfirmationSheet(
+    plan: com.autoglm.autoagent.agent.TaskPlan,
+    countdown: Int,
+    onConfirm: () -> Unit,
+    onCancel: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.7f)),
+        contentAlignment = Alignment.Center
+    ) {
+        com.autoglm.autoagent.ui.components.GlassCard(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(24.dp),
+            shape = RoundedCornerShape(24.dp),
+            backgroundColor = DarkSurface
+        ) {
+            Column(
+                modifier = Modifier.padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                // 标题
+                Row(
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Checklist,
+                        contentDescription = null,
+                        tint = PrimaryCyan,
+                        modifier = Modifier.size(28.dp)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text(
+                        text = "任务规划",
+                        style = MaterialTheme.typography.headlineSmall,
+                        color = TextPrimary,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                // 选择的 App
+                if (plan.selectedApp.isNotBlank()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(PrimaryBlue.copy(alpha = 0.15f))
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Apps,
+                            contentDescription = null,
+                            tint = PrimaryBlue,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "目标 App: ${plan.selectedApp}",
+                            color = TextPrimary,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                    
+                    Spacer(modifier = Modifier.height(16.dp))
+                }
+                
+                // 步骤列表
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 200.dp)
+                ) {
+                    plan.steps.forEachIndexed { index, step ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            // 步骤编号
+                            Box(
+                                modifier = Modifier
+                                    .size(24.dp)
+                                    .clip(CircleShape)
+                                    .background(PrimaryCyan.copy(alpha = 0.2f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "${index + 1}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = PrimaryCyan,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            
+                            Spacer(modifier = Modifier.width(12.dp))
+                            
+                            Text(
+                                text = step,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = TextSecondary
+                            )
+                        }
+                    }
+                }
+                
+                Spacer(modifier = Modifier.height(24.dp))
+                
+                // 按钮行
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    // 取消按钮
+                    OutlinedButton(
+                        onClick = onCancel,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = TextSecondary
+                        )
+                    ) {
+                        Text("取消")
+                    }
+                    
+                    // 确认按钮（带倒计时）
+                    Button(
+                        onClick = onConfirm,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = PrimaryBlue
+                        )
+                    ) {
+                        Text(
+                            text = if (countdown > 0) "确认 (${countdown}s)" else "确认",
+                            color = Color.White
+                        )
+                    }
+                }
+            }
+        }
+    }
+}

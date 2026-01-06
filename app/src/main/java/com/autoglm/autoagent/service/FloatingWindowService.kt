@@ -159,8 +159,9 @@ class FloatingWindowService : Service() {
                     Toast.makeText(this, "Resuming...", Toast.LENGTH_SHORT).show()
                     agentRepository.resumeAgent()
                 }
+                // 运行状态可以被该浮窗控制 (Stop)
                 is AgentState.Running, is AgentState.Planning -> {
-                    Toast.makeText(this, "Stopping...", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "Stopping (Floating Control)...", Toast.LENGTH_SHORT).show()
                     agentRepository.stopAgent()
                 }
             }

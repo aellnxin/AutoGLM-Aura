@@ -44,18 +44,29 @@ import javax.inject.Inject
 
 data class PermissionStatus(
     val accessibilityGranted: Boolean = false,
+    val shellServiceActive: Boolean = false,
     val overlayGranted: Boolean = false,
     val queryPackagesGranted: Boolean = false
-)
+) {
+    // 只要有无障碍或Shell服务其中之一，就视为拥有操作权限
+    val canControlDevice: Boolean get() = accessibilityGranted || shellServiceActive
+}
 
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
-    private val repository: SettingsRepository
+    private val repository: SettingsRepository,
+    private val shellConnector: com.autoglm.autoagent.shell.ShellServiceConnector
 ) : ViewModel() {
     val config = repository.config.stateIn(viewModelScope, SharingStarted.Lazily, null)
     
+    val agentMode = repository.agentMode.stateIn(viewModelScope, SharingStarted.Lazily, com.autoglm.autoagent.agent.AgentMode.TURBO)
+    
     private val _permissionStatus = MutableStateFlow(PermissionStatus())
     val permissionStatus = _permissionStatus.asStateFlow()
+    
+    fun saveAgentMode(mode: com.autoglm.autoagent.agent.AgentMode) {
+        repository.saveAgentMode(mode)
+    }
 
     fun saveConfig(provider: ApiProvider, baseUrl: String, apiKey: String, model: String) {
         viewModelScope.launch {
@@ -64,14 +75,24 @@ class SettingsViewModel @Inject constructor(
     }
     
     fun checkPermissions(context: Context) {
-        val status = PermissionStatus(
-            accessibilityGranted = isAccessibilityServiceEnabled(context),
-            overlayGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                Settings.canDrawOverlays(context)
-            } else true,
-            queryPackagesGranted = canQueryPackages(context)
-        )
-        _permissionStatus.value = status
+        viewModelScope.launch {
+            // 检查 Shell 服务状态（异步）
+            val isShellActive = try {
+                shellConnector.connect()
+            } catch (e: Exception) {
+                false
+            }
+            
+            val status = PermissionStatus(
+                accessibilityGranted = isAccessibilityServiceEnabled(context),
+                shellServiceActive = isShellActive,
+                overlayGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    Settings.canDrawOverlays(context)
+                } else true,
+                queryPackagesGranted = canQueryPackages(context)
+            )
+            _permissionStatus.value = status
+        }
     }
     
     private fun canQueryPackages(context: Context): Boolean {
@@ -99,7 +120,8 @@ class SettingsViewModel @Inject constructor(
         val status = _permissionStatus.value
         
         when {
-            !status.accessibilityGranted -> {
+            // 如果没有控制权限（既没开无障碍也没开Shell），才跳转无障碍设置
+            !status.canControlDevice -> {
                 // 跳转到无障碍设置
                 val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
                 intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -233,6 +255,17 @@ fun SettingsScreen(
                             modifier = Modifier.padding(start = 8.dp, bottom = 8.dp)
                         )
                         
+                        // 显示 Shell 服务状态（如果有）
+                        if (permissionStatus.shellServiceActive) {
+                            PermissionItem("Shell 服务 (高级模式)", true)
+                            Text(
+                                text = "• 状态: 已激活 ✅",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextSecondary,
+                                modifier = Modifier.padding(start = 8.dp, bottom = 8.dp)
+                            )
+                        }
+                        
                         PermissionItem("悬浮窗权限", permissionStatus.overlayGranted)
                         Text(
                             text = "• 用途: 显示悬浮控制按钮，方便随时停止任务",
@@ -261,6 +294,50 @@ fun SettingsScreen(
                         ) {
                             Text("检查并请求权限", color = TextPrimary)
                         }
+                    }
+                )
+                
+                // 模式切换卡片
+                val currentMode by viewModel.agentMode.collectAsState()
+                SettingsCard(
+                    title = "🧠 执行模式",
+                    content = {
+                        Text(
+                            "选择 AI 执行模式",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = TextSecondary,
+                            modifier = Modifier.padding(bottom = 12.dp)
+                        )
+                        
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            ProviderChip(
+                                text = "⚡ 极速模式",
+                                selected = currentMode == com.autoglm.autoagent.agent.AgentMode.TURBO,
+                                onClick = { viewModel.saveAgentMode(com.autoglm.autoagent.agent.AgentMode.TURBO) },
+                                modifier = Modifier.weight(1f)
+                            )
+                            ProviderChip(
+                                text = "🧠 思考模式",
+                                selected = currentMode == com.autoglm.autoagent.agent.AgentMode.DEEP,
+                                onClick = { viewModel.saveAgentMode(com.autoglm.autoagent.agent.AgentMode.DEEP) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        
+                        Spacer(modifier = Modifier.height(12.dp))
+                        
+                        Text(
+                            text = if (currentMode == com.autoglm.autoagent.agent.AgentMode.TURBO)
+                                "• 极速模式: 单模型快速执行，适合简单任务"
+                            else
+                                "• 思考模式: 双模型协作，大模型规划+小模型执行\n• 适合复杂任务，需要配置 ZHIPU 和 EDGE 两个 API",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary,
+                            modifier = Modifier.padding(start = 4.dp)
+                        )
                     }
                 )
 
