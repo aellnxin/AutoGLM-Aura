@@ -30,9 +30,9 @@ AutoGLM-Aura 是 [Open-AutoGLM](https://github.com/zai-org/Open-AutoGLM) 项目�
 - 🧠 **双模型执行模式**:
     - **极速模式 (Turbo)**: 单模型快速响应，适合简单直接的任务。
     - **思考模式 (Deep)**: 大模型规划 + 小模型执行，双模型协作攻克复杂任务。
-- 🔒 **安全存储** - API 配置经过加密处理。
-- 🌐 **自定义 API** - 支持自托管或第三方 AI 服务。
-- ✨ **直接注入** - 通过原生无障碍服务注入文本，无需切换输入法。
+- 🔒 **安全存储** - 采用 Android EncryptedSharedPreferences 加密存储 API Key 与配置信息。
+- 🌐 **灵活 API** - 兼容任何 OpenAI 格式接口，支持自托管模型 (如 Ollama、vLLM) 及第三方服务 (如智谱、DeepSeek)。
+- ✨ **原生文本注入** - 通过无障碍服务直接注入文本，无需 ADB 键盘或切换输入法。
 
 ### 🧠 极速 vs 思考模式对比
 
