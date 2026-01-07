@@ -69,11 +69,31 @@ class ShellActionExecutor(
     
     override suspend fun scroll(x1: Float, y1: Float, x2: Float, y2: Float): Boolean = withContext(Dispatchers.IO) {
         try {
-            // 模拟滑动：ACTION_DOWN -> ACTION_MOVE -> ACTION_UP
-            val down = connector.injectTouch(displayId, 0, x1.toInt(), y1.toInt())
-            val move = connector.injectTouch(displayId, 2, x2.toInt(), y2.toInt()) // ACTION_MOVE = 2
-            val up = connector.injectTouch(displayId, 1, x2.toInt(), y2.toInt())
-            down && move && up
+            // 模拟真实滑动：分步插值 ACTION_MOVE
+            val steps = 20
+            val duration = 300L
+            val stepDelay = duration / steps
+
+            // ACTION_DOWN = 0
+            var success = connector.injectTouch(displayId, 0, x1.toInt(), y1.toInt())
+            if (!success) return@withContext false
+            
+            // ACTION_MOVE = 2
+            for (i in 1..steps) {
+                val t = i.toFloat() / steps
+                val currentX = x1 + (x2 - x1) * t
+                val currentY = y1 + (y2 - y1) * t
+                
+                success = connector.injectTouch(displayId, 2, currentX.toInt(), currentY.toInt())
+                if (!success) break
+                kotlinx.coroutines.delay(stepDelay)
+            }
+            
+            // ACTION_UP = 1
+            if (success) {
+                success = connector.injectTouch(displayId, 1, x2.toInt(), y2.toInt())
+            }
+            success
         } catch (e: Exception) {
             Log.e(TAG, "Scroll failed", e)
             false
@@ -81,9 +101,12 @@ class ShellActionExecutor(
     }
     
     override suspend fun inputText(text: String): Boolean = withContext(Dispatchers.IO) {
-        // Shell 服务目前不支持文本输入，返回 false 以触发降级
-        Log.w(TAG, "Shell service does not support text input, fallback needed")
-        false
+        try {
+            connector.inputText(displayId, text)
+        } catch (e: Exception) {
+            Log.e(TAG, "Shell input text failed", e)
+            false
+        }
     }
     
     override suspend fun pressKey(keyCode: Int): Boolean = withContext(Dispatchers.IO) {
@@ -257,6 +280,18 @@ class FallbackActionExecutor @Inject constructor(
      * 获取当前可用的执行器
      */
     private fun getExecutor(): ActionExecutor? {
+        // 动态刷新：如果当前不可用，尝试刷新一次以解决时序问题
+        if (_currentMode.value == ExecutionMode.UNAVAILABLE) {
+            Log.w(TAG, "Executor unavailable, attempting force reconnect...")
+            try {
+                // 尝试强制重连 Shell 服务
+                connector.ensureConnection()
+            } catch (e: Exception) {
+                Log.e(TAG, "Force reconnect failed", e)
+            }
+            refreshMode()
+        }
+        
         return when (_currentMode.value) {
             ExecutionMode.SHELL -> shellExecutor
             ExecutionMode.ACCESSIBILITY -> accessibilityExecutor

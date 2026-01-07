@@ -83,21 +83,53 @@ class TaskNotificationManager @Inject constructor(
     }
     
     /**
-     * 发送任务失败通知
+     * 更新当前任务状态通知 (进度)
      */
-    fun notifyTaskFailed(taskName: String, error: String) {
+    fun updateStatus(status: String) {
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentTitle("❌ $taskName 失败")
-            .setContentText(error)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setAutoCancel(true)
+            .setContentTitle("AutoDroid 正在执行")
+            .setContentText(status)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOngoing(true) // 常驻
+            .setOnlyAlertOnce(true)
             .build()
         
         try {
-            NotificationManagerCompat.from(context).notify(NOTIFICATION_ID + 1, notification)
-        } catch (e: SecurityException) {
-            android.util.Log.w("TaskNotification", "No notification permission", e)
+            NotificationManagerCompat.from(context).notify(NOTIFICATION_ID + 2, notification)
+        } catch (e: SecurityException) {}
+    }
+
+    /**
+     * 发送错误告警通知 (需要用户注意)
+     */
+    fun showErrorNotification(title: String, message: String) {
+        val intent = context.packageManager.getLaunchIntentForPackage(context.packageName)?.apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
+        val pendingIntent = PendingIntent.getActivity(
+            context, 1, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_launcher_foreground) // 实际上应该用个警告图标
+            .setContentTitle("⚠️ $title")
+            .setContentText(message)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setVibrate(longArrayOf(0, 500, 200, 500))
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .build()
+        
+        try {
+            NotificationManagerCompat.from(context).notify(NOTIFICATION_ID + 3, notification)
+        } catch (e: SecurityException) {}
+    }
+
+    /**
+     * 清除进度通知
+     */
+    fun cancelStatusNotification() {
+        NotificationManagerCompat.from(context).cancel(NOTIFICATION_ID + 2)
     }
 }

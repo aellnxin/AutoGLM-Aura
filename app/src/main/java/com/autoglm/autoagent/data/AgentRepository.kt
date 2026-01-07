@@ -51,7 +51,8 @@ class AgentRepository @Inject constructor(
     private val shellConnector: com.autoglm.autoagent.shell.ShellServiceConnector,
     private val taskNotificationManager: com.autoglm.autoagent.utils.TaskNotificationManager,
     private val dualModelAgent: com.autoglm.autoagent.agent.DualModelAgent,
-    private val shizukuManager: com.autoglm.autoagent.shizuku.ShizukuManager
+    private val shizukuManager: com.autoglm.autoagent.shizuku.ShizukuManager,
+    private val fileLogger: com.autoglm.autoagent.utils.FileLogger
 ) {
     
     // Scope for launching tasks from voice callback
@@ -61,8 +62,8 @@ class AgentRepository @Inject constructor(
     private var currentTaskJob: kotlinx.coroutines.Job? = null
     
     // VirtualDisplay 后台执行支持
-    private var virtualDisplayId: Int = 0
-    private var isBackgroundMode: Boolean = false
+    internal var virtualDisplayId: Int = 0
+    internal var isBackgroundMode: Boolean = false
     private var currentTaskName: String = ""
 
     fun setListening(isListening: Boolean) {
@@ -160,6 +161,11 @@ class AgentRepository @Inject constructor(
         voiceManager.stopListening()
         _agentState.value = AgentState.Idle
     }
+
+    /**
+     * 获取 Shizuku 激活状态
+     */
+    fun getActivationStatus() = shizukuManager.getActivationStatus()
     
     fun pauseAgent() {
         if (_agentState.value == AgentState.Running) {
@@ -172,6 +178,18 @@ class AgentRepository @Inject constructor(
         if (_agentState.value == AgentState.Paused) {
             _agentState.value = AgentState.Running
             addUiMessage("system", "Agent Resumed.")
+        }
+    }
+
+    /**
+     * 等待用户恢复 (由 Paused 状态转回 Running)
+     */
+    suspend fun waitForResume() {
+        while (_agentState.value == AgentState.Paused) {
+            delay(com.autoglm.autoagent.config.TimingConfig.Task.PAUSE_CHECK_DELAY)
+            if (_agentState.value == AgentState.Idle) {
+                throw kotlinx.coroutines.CancellationException("Task stopped while paused")
+            }
         }
     }
 
@@ -203,6 +221,28 @@ class AgentRepository @Inject constructor(
 
     // 任务笔记: 用于实装 Note 功能,存储跨步骤的关键数据
     private val taskNotes = mutableListOf<String>()
+    
+    /**
+     * 添加日志消息到 chatMessages，供 UI 显示
+     * 自动限制最多保留200条最新日志
+     */
+    fun logMessage(role: String, message: String) {
+        val current = _chatMessages.value.toMutableList()
+        current.add(ChatMessage(role = role, content = message))
+        
+        // 同步记录到本地文件日志，支持 [应用日志] 页面查看
+        val level = if (role == "system" && message.contains("Error")) 
+            com.autoglm.autoagent.utils.FileLogger.LogLevel.ERROR else 
+            com.autoglm.autoagent.utils.FileLogger.LogLevel.INFO
+        fileLogger.log("Agent", level, "[$role] $message")
+
+        // 保留最近200条日志，防止内存占用过大
+        if (current.size > 200) {
+            _chatMessages.value = current.takeLast(200)
+        } else {
+            _chatMessages.value = current
+        }
+    }
 
     // Official System Prompt (Condensed)
     // Official System Prompt (Full Chinese Version)
@@ -262,20 +302,38 @@ class AgentRepository @Inject constructor(
 3. 如果页面未加载出内容，最多连续 Wait 三次，否则执行 Back重新进入。
 4. 如果页面显示网络问题，需要重新加载，请点击重新加载.如果没有重新加载按钮请重新打开app.
 5. 如果当前页面找不到目标联系人、商品、店铺等信息，可以尝试 Swipe 滑动查找。
-6. 遇到价格区间、时间区间等筛选条件，如果没有完全符合的，可以放宽要求。
-7. 在做小红书总结类任务时一定要筛选图文笔记。
-8. 购物车全选后再点击全选可以把状态设为全不选，在做购物车任务时，如果购物车里已经有商品被选中时，你需要点击全选后再点击取消全选，再去找需要购买或者删除的商品。
-9. 在做外卖任务时，如果相应店铺购物车里已经有其他商品你需要先把购物车清空再去购买用户指定的外卖。
-10. 在做点外卖任务时，如果用户需要点多个外卖，请尽量在同一店铺进行购买，如果无法找到可以下单，并说明某个商品未找到。
-11. 请严格遵循用户意图执行任务，用户的特殊要求可以执行多次搜索，滑动查找。比如（i）用户要求点一杯咖啡，要咸的，你可以直接搜索咸咖啡，或者搜索咖啡后滑动查找咸的咖啡，比如海盐咖啡。（ii）用户要找到XX群，发一条消息，你可以先搜索XX群，找不到结果后，将"群"字去掉，搜索XX重试。（iii）用户要找到宠物友好的餐厅，你可以搜索餐厅，找到筛选，找到设施，选择可带宠物，或者直接搜索可带宠物，必要时可以使用AI搜索。
-12. 在选择日期时，如果原滑动方向与预期日期越来越远，请向反方向滑动查找。
-13. 执行任务过程中如果有多个可选择的项目栏，请逐个查找每个项目栏，直到完成任务，一定不要在同一项目栏多次查找，从而陷入死循环。
-14. 在执行下一步操作前请一定要检查上一步的操作是否生效，如果点击没生效，可能因为app反应较慢，请先稍微等待一下，如果还是不生效请调整一下点击位置重试，如果仍然不生效请跳过这一步继续任务，并在finish message说明点击不生效。
-15. 在执行任务中如果遇到滑动不生效的情况，请调整一下起始点位置，增大滑动距离重试，如果还是不生效，有可能是已经滑到底了，请继续向反方向滑动，直到顶部或底部，如果仍然没有符合要求的结果，请跳过这一步继续任务，并在finish message说明但没找到要求的项目。
-16. 在做游戏任务时如果在战斗页面如果有自动战斗一定要开启自动战斗，如果多轮历史状态相似要检查自动战斗是否开启。
-17. 如果没有合适的搜索结果，可能是因为搜索页面不对，请返回到搜索页面的上一级尝试重新搜索，如果尝试三次返回上一级搜索后仍然没有符合要求的结果，执行 finish(message="原因")。
-18. 在结束任务前请一定要仔细检查任务是否完整准确的完成，如果出现错选、漏选、多选的情况，请返回之前的步骤进行纠正.
-19. 如果执行Launch启动app后显示的界面不是符合的界面,请使用home操作返回到主屏幕后尝试通过桌面找到app后使用Tap点击操作启动app,如果桌面找不到请结束任务.
+6. 遇到价格区间、时间区间等筛选条件，如果没有完全符合的，可以放宽要求。 
+7. 价格理解规则
+   (a) 单品场景（无数量词）：
+       "9.9的辣条" → 单品价格上限 9.9，下限 9.0（下浮10%）
+   
+   (b) 多品场景（有数量词 + 有价格）：
+       判断依据：是否包含"每个/单个/一个/单价"等单品关键词
+       
+       - 包含单品词："两个披萨，每个不超过50" → 单品价格≤50
+       - 不包含（默认）："两个披萨不超过50" → 总价≤50 → 推算单价≤25
+   
+   (c) 推算公式：
+       单品价格上限 = 总价上限 ÷ 数量
+       单品价格下限 = 单品价格上限 × 0.9（下浮10%）
+8. 在做小红书总结类任务时一定要筛选图文笔记。
+9. 购物车全选后再点击全选可以把状态设为全不选，在做购物车任务时，如果购物车里已经有商品被选中时，你需要点击全选后再点击取消全选，再去找需要购买或者删除的商品。
+10. 在做外卖任务时，如果相应店铺购物车里已经有其他商品你需要先把购物车清空再去购买用户指定的外卖。
+11. 在做点外卖任务时，如果用户需要点多个外卖，请尽量在同一店铺进行购买，如果无法找到可以下单，并说明某个商品未找到。
+12. 请严格遵循用户意图执行任务，用户的特殊要求可以执行多次搜索，滑动查找。比如（i）用户要求点一杯咖啡，要咸的，你可以直接搜索咸咖啡，或者搜索咖啡后滑动查找咸的咖啡，比如海盐咖啡。（ii）用户要找到XX群，发一条消息，你可以先搜索XX群，找不到结果后，将"群"字去掉，搜索XX重试。（iii）用户要找到宠物友好的餐厅，你可以搜索餐厅，找到筛选，找到设施，选择可带宠物，或者直接搜索可带宠物，必要时可以使用AI搜索。
+13. 在选择日期时，如果原滑动方向与预期日期越来越远，请向反方向滑动查找。
+14. 执行任务过程中如果有多个可选择的项目栏，请逐个查找每个项目栏，直到完成任务，一定不要在同一项目栏多次查找，从而陷入死循环。
+15. 在执行下一步操作前请一定要检查上一步的操作是否生效，如果点击没生效，可能因为app反应较慢，请先稍微等待一下，如果还是不生效请调整一下点击位置重试，如果仍然不生效请跳过这一步继续任务，并在finish message说明点击不生效。
+16. 在执行任务中如果遇到滑动不生效的情况，请调整一下起始点位置，增大滑动距离重试，如果还是不生效，有可能是已经滑到底了，请继续向反方向滑动，直到顶部或底部，如果仍然没有符合要求的结果，请跳过这一步继续任务，并在finish message说明但没找到要求的项目。
+17. 在做游戏任务时如果在战斗页面如果有自动战斗一定要开启自动战斗，如果多轮历史状态相似要检查自动战斗是否开启。
+18. 如果没有合适的搜索结果，可能是因为搜索页面不对，请返回到搜索页面的上一级尝试重新搜索，如果尝试三次返回上一级搜索后仍然没有符合要求的结果，执行 finish(message="原因")。
+19. 在结束任务前请一定要仔细检查任务是否完整准确的完成，如果出现错选、漏选、多选的情况，请返回之前的步骤进行纠正.
+20. 如果执行Launch启动app后显示的界面不是符合的界面,请使用home操作返回到主屏幕后尝试通过桌面找到app后使用Tap点击操作启动app,如果桌面找不到请结束任务.
+21. 面对模糊数量词（如‘几个’、‘一点’），必须根据任务风险等级进行分层处理：
+高风险/交易类（买东西、转账、发消息）： 禁止自动填充数字。必须触发‘反问机制’（Clarification），要求用户确认具体数量，或默认设置为最小单位（1）并停留在确认页面等待用户点击。
+反例： ‘帮忙订购几个外卖’ -> 不应直接生成订单，而应回复‘已为您打开外卖页面，请确认需要订购的具体份数’或默认选1份但在支付前强阻断。
+低风险/操作类（点赞、刷新、下滑）： 设定一个符合人类行为习惯的小随机范围（如 3-8 次）的固定数字，以方便后续执行。
+
 """.trimIndent()
 
     }
@@ -288,11 +346,45 @@ class AgentRepository @Inject constructor(
         _chatMessages.value = emptyList() // 清空 UI 历史记录，确保新任务从 Step 1 开始显示
         currentTaskName = goal  // 记录任务名称用于通知
         
-        // ===== 检查 Agent 模式：DEEP 使用双模型 =====
-        val agentMode = settingsRepository.getAgentMode()
-        if (agentMode == com.autoglm.autoagent.agent.AgentMode.DEEP) {
-            addUiMessage("system", "🧠 思考模式启动 (大模型规划 + 小模型执行)")
-            try {
+        try {
+            // ===== 1. 尝试创建 VirtualDisplay (只要 Shell 服务在高级模式正常运行，就进入后台执行) =====
+            if (shizukuManager.ensureConnected()) {
+                val width = defaultScreenWidth
+                val height = defaultScreenHeight
+                val density = context.resources.displayMetrics.densityDpi
+                
+                val displayId = shellConnector.createVirtualDisplay("AutoDroid-Agent", width, height, density)
+                if (displayId > 0) {
+                    virtualDisplayId = displayId
+                    isBackgroundMode = true
+                    addUiMessage("system", "🖥️ 后台隔离运行已开启 (ID: $displayId)")
+                    Log.i("Agent", "Created VirtualDisplay: $displayId")
+                    
+                    fallbackExecutor.setDisplayId(displayId)
+                    
+                    // 尝试提取目标 App 并直接在此显示器启动
+                    val targetApp = if (settingsRepository.getAgentMode() != com.autoglm.autoagent.agent.AgentMode.DEEP) 
+                        appManager.findAppInText(goal) else null
+                    
+                    if (targetApp != null) {
+                        // [Fix] 尝试先停止 App 确保冷启动 (防止 "热切换" 导致的 DisplayId 迁移失败)
+                        // 安全性保障: stopApp 内部已禁止停止系统应用和 AutoDroid 自身
+                        appManager.stopApp(targetApp)
+                        delay(200)
+
+                        addUiMessage("system", "🚀 准备在后台屏启动: $targetApp")
+                        if (appManager.launchApp(targetApp, displayId)) {
+                            delay(2000)
+                        }
+                    }
+                }
+            }
+
+            // ===== 2. 检查 Agent 模式：DEEP 使用双模型 =====
+            val agentMode = settingsRepository.getAgentMode()
+            if (agentMode == com.autoglm.autoagent.agent.AgentMode.DEEP) {
+                _agentState.value = AgentState.Planning
+                addUiMessage("system", "🧠 思考模式启动 (大模型规划 + 小模型执行)")
                 if (!dualModelAgent.canExecute()) {
                     _agentState.value = AgentState.Error("大模型或小模型不可用，请检查 API 配置")
                     addUiMessage("system", "❌ 双模型不可用")
@@ -302,6 +394,7 @@ class AgentRepository @Inject constructor(
                 }
                 
                 val result = dualModelAgent.startTask(goal)
+                _agentState.value = AgentState.Running // 规划完成后切换到 Running
                 when (result) {
                     is com.autoglm.autoagent.agent.TaskResult.Success -> {
                         addUiMessage("system", "✅ 任务完成: ${result.message}")
@@ -316,69 +409,23 @@ class AgentRepository @Inject constructor(
                         addUiMessage("system", "任务已取消")
                     }
                 }
-            } catch (e: Exception) {
-                android.util.Log.e("Agent", "DualModelAgent 执行失败", e)
-                _agentState.value = AgentState.Error(e.message ?: "未知错误")
-                addUiMessage("system", "❌ 错误: ${e.message}")
-            } finally {
-                _agentState.value = AgentState.Idle
+                return // DEEP 模式提前返回，依靠外层 finally 清理
             }
-            return // DEEP 模式提前返回，不走下面的 TURBO 流程
-        }
-        
-        // ===== 以下是 TURBO 模式（原有整个流程） =====
-        
-        // ===== 执行前权限和服务检查 =====
-        val checkResult = checkPrerequisites()
-        if (!checkResult.first) {
-            _agentState.value = AgentState.Error(checkResult.second)
-            addUiMessage("system", "❌ 前置检查失败:\n${checkResult.second}")
-            delay(TimingConfig.Task.ERROR_DELAY)
-            stopAgent()
-            return
-        }
-        addUiMessage("system", "✅ 权限检查通过,开始执行任务...")
-        
-        // ===== 1. 创建 VirtualDisplay (后台模式) =====
-        if (shellConnector.connect()) {
-            val width = defaultScreenWidth
-            val height = defaultScreenHeight
-            val density = context.resources.displayMetrics.densityDpi
             
-            val displayId = shellConnector.createVirtualDisplay("AutoDroid-Agent", width, height, density)
-            if (displayId > 0) {
-                virtualDisplayId = displayId
-                isBackgroundMode = true
-                addUiMessage("system", "🖥️ VirtualDisplay Created (ID: $displayId)")
-                Log.i("Agent", "Created VirtualDisplay: $displayId")
-                
-                // 设置执行器目标 Display
-                fallbackExecutor.setDisplayId(displayId)
-                
-                // ===== 2. 尝试识别并启动目标 App =====
-                // 自动识别并启动目标 App
-                val targetApp = appManager.findAppInText(goal)
-                
-                if (targetApp != null) {
-                    addUiMessage("system", "🚀 Launching: $targetApp on Display $displayId")
-                    val launched = appManager.launchApp(targetApp, displayId)
-                    if (launched) {
-                        // 等待应用启动
-                        delay(3000)
-                    } else {
-                        addUiMessage("system", "⚠️ Failed to launch $targetApp")
-                    }
-                } else {
-                    addUiMessage("system", "ℹ️ 未识别到具体应用，将直接在 VirtualDisplay 操作")
-                }
-            } else {
-                addUiMessage("system", "⚠️ 创建 VirtualDisplay 失败，降级到主屏幕")
-                fallbackExecutor.setDisplayId(0)
+            // ===== 3. 以下是 TURBO 模式（原有整个流程） =====
+            
+            // ===== 执行前权限和服务检查 =====
+            val checkResult = checkPrerequisites()
+            if (!checkResult.first) {
+                _agentState.value = AgentState.Error(checkResult.second)
+                addUiMessage("system", "❌ 前置检查失败:\n${checkResult.second}")
+                delay(TimingConfig.Task.ERROR_DELAY)
+                stopAgent()
+                return
             }
-        } else {
-            addUiMessage("system", "⚠️ Shell 服务未连接，运行在主屏幕")
-             fallbackExecutor.setDisplayId(0)
-        }
+            addUiMessage("system", "✅ 权限检查通过,开始执行任务...")
+        
+            // 这里原本是 VirtualDisplay 的初始化位置，现已上移。
         
         // ===== 检查完成 =====
         
@@ -438,6 +485,24 @@ class AgentRepository @Inject constructor(
                 
                 // addUiMessage("system", "Step $stepsCount thinking...") -> Removed as per user request
 
+
+                // 截图前确保 Shell 服务依然存活 (如果处于后台模式)
+                if (isBackgroundMode) {
+                    var retryCount = 0
+                    while (!shizukuManager.ensureConnected() && retryCount < 3) {
+                        retryCount++
+                        Log.w("Agent", "Shell disconnected in background, retry $retryCount/3")
+                        taskNotificationManager.updateStatus("正在尝试重连 Shell 服务 ($retryCount/3)...")
+                        delay(2000)
+                    }
+                    
+                    if (!shizukuManager.isServiceConnected.value) {
+                        taskNotificationManager.showErrorNotification("任务暂停", "Shell 服务已断开并无法重连，请进入 App 处理。")
+                        addUiMessage("system", "❌ Shell 服务断开且重连失败")
+                        _agentState.value = AgentState.Idle
+                        break
+                    }
+                }
 
                 // 1. 获取当前状态
                 feedbackManager.cancelForScreenshot()
@@ -551,13 +616,7 @@ class AgentRepository @Inject constructor(
                 }
                 
                 // 检查是否暂停
-                while (_agentState.value == AgentState.Paused) {
-                    delay(TimingConfig.Task.PAUSE_CHECK_DELAY)
-                    if (_agentState.value == AgentState.Idle) {
-                         addUiMessage("system", "任务已停止")
-                         return
-                    }
-                }
+                waitForResume()
 
                 // 检查是否被停止
                 if (_agentState.value == AgentState.Idle) {
@@ -583,6 +642,16 @@ class AgentRepository @Inject constructor(
             addUiMessage("system", "Error: $errorMsg")
             delay(TimingConfig.Task.ERROR_DELAY)
             _agentState.value = AgentState.Idle
+        }
+        } finally {
+            // 确保任务结束时清理常驻通知和虚拟屏幕
+            taskNotificationManager.cancelStatusNotification()
+            if (virtualDisplayId > 0) {
+                shellConnector.releaseDisplay(virtualDisplayId)
+                virtualDisplayId = 0
+            }
+            _agentState.value = AgentState.Idle
+            isBackgroundMode = false
         }
     }
 
@@ -623,14 +692,13 @@ class AgentRepository @Inject constructor(
     private fun checkPrerequisites(): Pair<Boolean, String> {
         // 1. 检查控制权限 (无障碍 或 Shell)
         val hasAccessibility = AutoAgentService.instance != null
-        val hasShell = try { shellConnector.connect() } catch (e: Exception) { false }
         
-        if (!hasAccessibility && !hasShell) {
-            return Pair(false, "服务未就绪\n请开启无障碍服务 或 激活 Shell 服务(高级模式)")
+        // 尝试连接 Shell 服务 (如果已授权)
+        val shellServiceActive = if (shizukuManager.hasPermission()) shizukuManager.ensureConnected() else false
+        
+        if (!hasAccessibility && !shellServiceActive) {
+            return Pair(false, "控制权限未就绪\n请开启‘无障碍服务’或在‘高级模式’中激活 Shizuku")
         }
-        
-        // 用户反馈：有无障碍或Shell权限时，不需要额外检查截图权限(MediaProjection)
-        // 系统会自动降级或使用现有能力
         
         // 2. 检查 AI 配置
         val config = settingsRepository.config.value
@@ -738,9 +806,11 @@ class AgentRepository @Inject constructor(
                         }
                         isDeadlockState = false
                         val (absX, absY) = denormalizeCoordinates(normX, normY, screenWidth, screenHeight)
-                        AutoAgentService.instance?.click(absX, absY)
+                        
+                        // 核心修复：统一使用 fallbackExecutor
+                        fallbackExecutor.tap(absX, absY)
                         delay(TimingConfig.Action.TAP_DELAY)
-                        "Tapped ($normX, $normY)"
+                        "Tapped ($normX, $normY) on Display ${fallbackExecutor.getDisplayId()}"
                     } else "Failed to parse Tap coords"
                 }
                 
@@ -755,9 +825,11 @@ class AgentRepository @Inject constructor(
                         val (eX, eY) = resolveCenter(endM)
                         val (absSX, absSY) = denormalizeCoordinates(sX, sY, screenWidth, screenHeight)
                         val (absEX, absEY) = denormalizeCoordinates(eX, eY, screenWidth, screenHeight)
-                        AutoAgentService.instance?.scroll(absSX, absSY, absEX, absEY)
+                        
+                        // 核心修复：统一使用 fallbackExecutor
+                        fallbackExecutor.scroll(absSX, absSY, absEX, absEY)
                         delay(TimingConfig.Action.SWIPE_DELAY)
-                        "Swiped ($sX,$sY)->($eX,$eY)"
+                        "Swiped on Display ${fallbackExecutor.getDisplayId()}"
                     } else "Failed to parse Swipe coords"
                 }
                 
@@ -772,8 +844,8 @@ class AgentRepository @Inject constructor(
                                    .replace(Regex("(?s)\\{think\\}.*?\\{/think\\}"), "")
                                    .trim()
                         
-                        var success = com.autoglm.autoagent.service.AgentInputMethodService.instance?.inputText(text) ?: false
-                        if (!success) success = AutoAgentService.instance?.inputText(text) ?: false
+                        // 核心修复：后台模式下无障碍输入往往失效，统一使用支持 Shell 输入的 fallbackExecutor
+                        val success = fallbackExecutor.inputText(text)
                         delay(TimingConfig.Action.TYPE_DELAY)
                         if (success) "Typed: $text" else "Type Failed"
                     } else "Failed to parse text"
@@ -785,26 +857,39 @@ class AgentRepository @Inject constructor(
                     val m = Pattern.compile("app\\s*=\\s*[\"'](.*?)[\"']").matcher(trimmedAction)
                     if (m.find()) {
                         val appName = m.group(1)
-                        val success = appManager.launchApp(appName)
+                        // [Fix] 统一启动逻辑：支持后台模式 + 强制冷启动
+                        val displayId = if (isBackgroundMode) virtualDisplayId else 0
+                        appManager.stopApp(appName)
+                        delay(200)
+                        
+                        val success = appManager.launchApp(appName, displayId)
                         delay(TimingConfig.Action.LAUNCH_DELAY)
-                        if (success) "Launched $appName" else "Launch Failed: $appName"
+                        if (success) "Launched $appName (Display $displayId)" else "Launch Failed: $appName"
                     } else "Failed to parse app name"
                 }
                 
                 "home" -> {
                     resetDuplicateTracker()
                     isDeadlockState = false
-                    AutoAgentService.instance?.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME)
+                    if (isBackgroundMode) {
+                        shellConnector.pressHome()
+                    } else {
+                        AutoAgentService.instance?.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME)
+                    }
                     delay(TimingConfig.Action.HOME_DELAY)
-                    "Home Pressed"
+                    "Home Pressed (Mode: ${if(isBackgroundMode) "Background" else "Foreground"})"
                 }
                 
                 "back" -> {
                     resetDuplicateTracker()
                     isDeadlockState = false
-                    AutoAgentService.instance?.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK)
+                    if (isBackgroundMode) {
+                        shellConnector.pressBack()
+                    } else {
+                        AutoAgentService.instance?.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK)
+                    }
                     delay(TimingConfig.Action.BACK_DELAY)
-                    "Back Pressed"
+                    "Back Pressed (Mode: ${if(isBackgroundMode) "Background" else "Foreground"})"
                 }
 
                 "long press", "long_press", "double tap", "double_tap" -> {
@@ -812,13 +897,15 @@ class AgentRepository @Inject constructor(
                     if (m.find()) {
                         val (normX, normY) = resolveCenter(m)
                         val (absX, absY) = denormalizeCoordinates(normX, normY, screenWidth, screenHeight)
+                        
+                        // 核心修复：统一使用 fallbackExecutor 以支持后台屏幕
                         if (actionName.contains("long")) {
-                            AutoAgentService.instance?.longPress(absX, absY)
+                            fallbackExecutor.longPress(absX, absY)
                         } else {
-                            AutoAgentService.instance?.doubleTap(absX, absY)
+                            fallbackExecutor.doubleTap(absX, absY)
                         }
                         delay(TimingConfig.Action.TAP_DELAY)
-                        "Executed Press/Tap at ($normX, $normY)"
+                        "Executed $actionName at ($normX, $normY) on Display ${fallbackExecutor.getDisplayId()}"
                     } else "Failed to parse coords"
                 }
 
@@ -915,13 +1002,21 @@ class AgentRepository @Inject constructor(
         currentTaskJob?.cancel()
         currentTaskJob = null
         
+        // 核心修复：停止任务时必须释放虚拟屏幕
+        if (virtualDisplayId > 0) {
+            shellConnector.releaseDisplay(virtualDisplayId)
+            virtualDisplayId = 0
+            isBackgroundMode = false
+            fallbackExecutor.setDisplayId(0) // 重置执行器
+        }
+
         // Stop listening if active
         voiceManager.cancelListening()
         
         // Set state to idle
         _agentState.value = AgentState.Idle
         
-        android.util.Log.d("Agent", "Task stopped, floating window remains active")
+        android.util.Log.d("Agent", "Task stopped, virtual display released")
     }
     
     // 内部类：异常/死循环检测器
@@ -997,13 +1092,6 @@ class AgentRepository @Inject constructor(
     }
     
     /**
-     * 公开的添加 UI 消息方法，供 DualModelAgent 等外部组件调用
-     */
-    fun logMessage(role: String, content: String) {
-        addMessage(role, content)
-    }
-    
-    /**
      * 从最后一条 user 消息中移除图片,仅保留文本
      * 匹配 Python: self._context[-1] = MessageBuilder.remove_images_from_message(self._context[-1])
      */
@@ -1049,8 +1137,22 @@ class AgentRepository @Inject constructor(
 
 
     // 辅助方法：截图
-    // 辅助方法：截图
     private suspend fun captureScreenshot(): ScreenshotData? {
+        // 0. 后台模式优先使用 Shell 服务（针对特定 VirtualDisplay）
+        if (isBackgroundMode && virtualDisplayId > 0) {
+            try {
+                val data = shellConnector.captureScreen(virtualDisplayId)
+                if (data != null && data.isNotEmpty()) {
+                    val bitmap = android.graphics.BitmapFactory.decodeByteArray(data, 0, data.size)
+                    if (bitmap != null) {
+                        return processBitmap(bitmap)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("Agent", "Background screenshot failed", e)
+            }
+        }
+
         val accessibilityService = AutoAgentService.instance
         
         // 1. 优先使用无障碍服务 (API 30+，无需额外权限)
@@ -1061,25 +1163,19 @@ class AgentRepository @Inject constructor(
             }
         }
         
-        // 2. 尝试 Shell 服务 (高级模式，无需额外权限)
+        // 2. 尝试 Shell 服务 (主屏幕，无需额外权限)
         try {
-            // 注意：connect() 是为了检查可用性，实际截图依赖 shellConnector 的实现
-            // 这里假设 connect() 开销不大或者已经保持连接
-            if (shellConnector.connect()) {
-                val path = shellConnector.captureScreen(0)
-                if (!path.isNullOrEmpty()) {
-                    // 尝试读取文件 (Shell Service 需要将文件保存在应用可读的位置，如 sdcard)
-                    val bitmap = android.graphics.BitmapFactory.decodeFile(path)
+            if (shizukuManager.ensureConnected()) {
+                val data = shellConnector.captureScreen(0)
+                if (data != null && data.isNotEmpty()) {
+                    val bitmap = android.graphics.BitmapFactory.decodeByteArray(data, 0, data.size)
                     if (bitmap != null) {
-                        Log.d("Agent", "✅ Shell screenshot success: $path")
                         return processBitmap(bitmap)
-                    } else {
-                         Log.w("Agent", "❌ Shell screenshot captured but decode failed (Permission issue?): $path")
                     }
                 }
             }
         } catch (e: Exception) {
-            Log.e("Agent", "Shell screenshot attempt failed", e)
+            Log.e("Agent", "Shell screenshot failed", e)
         }
         
         // 3. 最后尝试 MediaProjection (旧版/降级，需要录屏权限)

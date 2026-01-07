@@ -79,50 +79,6 @@ class HomeViewModel @Inject constructor(
     init {
         // Preload voice model on ViewModel creation
         agentRepository.preloadVoiceModel()
-        
-        // Auto-run Diagnostics
-        checkAccessibilityStatus()
-    }
-    
-    fun checkAccessibilityStatus() {
-        // 1. Check System Settings
-        val serviceId = "${context.packageName}/com.autoglm.autoagent.service.AutoAgentService"
-        val enabledServices = Settings.Secure.getString(
-            context.contentResolver,
-            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-        ) ?: ""
-        val isSystemEnabled = enabledServices.contains(serviceId)
-        
-        // 2. Check Actual Service Connection (Instance)
-        val isServiceConnected = com.autoglm.autoagent.service.AutoAgentService.instance != null
-        
-        agentRepository.addMessage("system", "🔍 系统自检报告 (System Report)")
-        
-        if (isSystemEnabled) {
-            agentRepository.addMessage("system", "✅ [系统开关] 已开启 (Settings: Enabled)")
-        } else {
-             agentRepository.addMessage("system", "❌ [系统开关] 未开启 (请去设置打开)")
-        }
-        
-        if (isServiceConnected) {
-             agentRepository.addMessage("system", "✅ [服务连接] 正常 (Service Connected)")
-        } else {
-             if (isSystemEnabled) {
-                 agentRepository.addMessage("system", "⚠️ [服务连接] 异常！(系统已开但服务未连)")
-                 agentRepository.addMessage("system", "💡 建议: 请尝试关闭无障碍再重新打开，或重启设备。")
-             } else {
-                 agentRepository.addMessage("system", "❌ [服务连接] 断开 (等待开启)")
-             }
-        }
-        
-        // 3. KeepAlive Status (Battery Optimization)
-        if (!KeepAliveUtils.isIgnoringBatteryOptimizations(context)) {
-             agentRepository.addMessage("system", "⚠️ [电池优化] 受限 (可能被杀)")
-             agentRepository.addMessage("system", "👉 正在请求忽略电池优化...")
-             KeepAliveUtils.requestIgnoreBatteryOptimizations(context)
-        } else {
-             agentRepository.addMessage("system", "✅ [电池优化] 已忽略 (无限制)")
-        }
     }
     
     // 监听AgentRepository的消息
@@ -182,10 +138,9 @@ class HomeViewModel @Inject constructor(
                         else -> contentText = c.toString()
                     }
                     
-                    val type = when {
-                        msg.role == "user" && contentText.startsWith("Task:") -> LogType.USER_COMMAND
-                        msg.role == "assistant" -> LogType.AI_ACTION
-                        msg.role == "system" && (contentText.contains("Step") || contentText.contains("Error")) -> LogType.AI_ACTION
+                    val type = when (msg.role) {
+                        "user" -> LogType.USER_COMMAND
+                        "assistant", "system" -> LogType.AI_ACTION
                         else -> null
                     }
                     
@@ -193,7 +148,7 @@ class HomeViewModel @Inject constructor(
                         LogEntry(
                             timestamp = System.currentTimeMillis(),
                             type = type,
-                            content = contentText.removePrefix("Task: ").removePrefix("Think: ").removePrefix("Action: ").trim(),
+                            content = contentText.removePrefix("Action: ").trim(),
                             imageBase64 = imageBase64
                         )
                     } else null
@@ -220,10 +175,13 @@ class HomeViewModel @Inject constructor(
     }
     
     fun sendMessage(text: String) {
-        // 发送指令前检测无障碍服务
-        if (!isAccessibilityServiceEnabled()) {
+        // 发送指令前检测权限：无障碍服务 或 Shell 服务任一开启即可
+        // [Fix] 直接调用 agentRepository 中的 shizukuManager 实例获取状态
+        val isShizukuActive = agentRepository.getActivationStatus() == com.autoglm.autoagent.shizuku.ActivationStatus.ACTIVATED
+        
+        if (!isAccessibilityServiceEnabled() && !isShizukuActive) {
             viewModelScope.launch {
-                agentRepository.setError("请先开启无障碍服务")
+                agentRepository.setError("请先开启无障碍服务或激活 Shell 高级模式")
                 kotlinx.coroutines.delay(3000)
                 agentRepository.resetToIdle()
             }
@@ -274,6 +232,13 @@ class HomeViewModel @Inject constructor(
     fun cancelPlan() {
         dualModelAgent.cancelPlan()
     }
+    
+    // ASK_USER 相关
+    val pendingQuestion = dualModelAgent.pendingQuestion
+    
+    fun answerQuestion(answer: String) {
+        dualModelAgent.answerQuestion(answer)
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalAnimationApi::class)
@@ -295,6 +260,9 @@ fun HomeScreen(
     // 规划确认状态
     val pendingPlan by viewModel.pendingPlan.collectAsState()
     val planCountdown by viewModel.planCountdown.collectAsState()
+    
+    // ASK_USER 状态
+    val pendingQuestion by viewModel.pendingQuestion.collectAsState()
 
     // Root Container with Particle Background
     Box(
@@ -394,7 +362,7 @@ fun HomeScreen(
                             "开始语音识别"
                         }
                         onClick {
-                            if (agentState is AgentState.Running || agentState is AgentState.Listening) {
+                            if (agentState is AgentState.Running || agentState is AgentState.Listening || agentState is AgentState.Planning) {
                                 viewModel.stopExecution()
                             } else {
                                 viewModel.startVoiceRecording()
@@ -410,7 +378,7 @@ fun HomeScreen(
                                 isOrbPressed = false
                             },
                             onTap = {
-                                if (agentState is AgentState.Running || agentState is AgentState.Listening) {
+                                if (agentState is AgentState.Running || agentState is AgentState.Listening || agentState is AgentState.Planning) {
                                     viewModel.stopExecution()
                                 } else {
                                     viewModel.startVoiceRecording()
@@ -580,6 +548,15 @@ fun HomeScreen(
                 countdown = planCountdown,
                 onConfirm = { viewModel.confirmPlan() },
                 onCancel = { viewModel.cancelPlan() }
+            )
+        }
+        
+        // ASK_USER 弹窗
+        pendingQuestion?.let { question ->
+            AskUserDialog(
+                question = question,
+                onAnswer = { viewModel.answerQuestion(it) },
+                onDismiss = { viewModel.answerQuestion("") }
             )
         }
     }
@@ -801,6 +778,113 @@ fun TextInputSheet(onSend: (String) -> Unit, onDismiss: () -> Unit) {
     }
 }
 
+/**
+ * ASK_USER 弹窗 - 显示 AI 问题并接收用户回复
+ */
+@Composable
+fun AskUserDialog(
+    question: String,
+    onAnswer: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var text by remember { mutableStateOf("") }
+    
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.85f))
+            .clickable(enabled = false) {},
+        contentAlignment = Alignment.Center
+    ) {
+        com.autoglm.autoagent.ui.components.GlassCard(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(24.dp)
+                .imePadding(),
+            backgroundColor = DarkSurface
+        ) {
+            Column(
+                modifier = Modifier.padding(20.dp)
+            ) {
+                // 标题
+                Row(
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.QuestionAnswer,
+                        contentDescription = null,
+                        tint = PrimaryBlue,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text(
+                        text = "需要您的确认",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = TextPrimary,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                // AI 问题
+                Text(
+                    text = question,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = TextSecondary,
+                    lineHeight = 24.sp
+                )
+                
+                Spacer(modifier = Modifier.height(20.dp))
+                
+                // 输入框
+                TextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = TextFieldDefaults.colors(
+                        focusedContainerColor = Color.White.copy(alpha = 0.1f),
+                        unfocusedContainerColor = Color.White.copy(alpha = 0.05f),
+                        focusedTextColor = TextPrimary,
+                        unfocusedTextColor = TextPrimary
+                    ),
+                    placeholder = { Text("输入您的回复...", color = TextSecondary) },
+                    shape = RoundedCornerShape(12.dp)
+                )
+                
+                Spacer(modifier = Modifier.height(20.dp))
+                
+                // 按钮行
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = TextSecondary
+                        )
+                    ) {
+                        Text("取消")
+                    }
+                    
+                    Button(
+                        onClick = { if (text.isNotBlank()) onAnswer(text) },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = PrimaryBlue
+                        ),
+                        enabled = text.isNotBlank()
+                    ) {
+                        Text("发送", color = Color.White)
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 fun LogItem(log: LogEntry) {
     Row(verticalAlignment = Alignment.Top) {
@@ -966,33 +1050,6 @@ fun PlanConfirmationSheet(
                 
                 Spacer(modifier = Modifier.height(16.dp))
                 
-                // 选择的 App
-                if (plan.selectedApp.isNotBlank()) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(PrimaryBlue.copy(alpha = 0.15f))
-                            .padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Apps,
-                            contentDescription = null,
-                            tint = PrimaryBlue,
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "目标 App: ${plan.selectedApp}",
-                            color = TextPrimary,
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                    }
-                    
-                    Spacer(modifier = Modifier.height(16.dp))
-                }
-                
                 // 步骤列表
                 Column(
                     modifier = Modifier
@@ -1025,7 +1082,7 @@ fun PlanConfirmationSheet(
                             Spacer(modifier = Modifier.width(12.dp))
                             
                             Text(
-                                text = step,
+                                text = step.description,
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = TextSecondary
                             )

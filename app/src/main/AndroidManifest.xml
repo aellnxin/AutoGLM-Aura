@@ -47,10 +47,6 @@
                 android:resource="@xml/accessibility_service_config" />
         </service>
 
-        <!-- 悬浮窗配对服务 -->
-        <service
-            android:name=".shell.PairingFloatService"
-            android:exported="false" />
 
         <service
             android:name=".service.AgentInputMethodService"

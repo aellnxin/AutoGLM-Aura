@@ -37,7 +37,8 @@ class VisionWorker @Inject constructor(
     private val settingsRepository: SettingsRepository,
     private val aiClient: AIClient,
     private val actionExecutor: FallbackActionExecutor,
-    private val appManager: AppManager
+    private val appManager: AppManager,
+    private val shellConnector: com.autoglm.autoagent.shell.ShellServiceConnector
 ) {
     companion object {
         private const val TAG = "VisionWorker"
@@ -262,13 +263,37 @@ class VisionWorker @Inject constructor(
     // ==================== 私有方法 ====================
 
     private suspend fun captureScreenshot(): Bitmap? {
-        val accessibilityService = AutoAgentService.instance
-        return if (accessibilityService != null && 
-            android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-            accessibilityService.takeScreenshotAsync()
-        } else {
-            null
+        val displayId = actionExecutor.getDisplayId()
+        
+        // 0. 后台模式优先
+        if (displayId > 0) {
+            try {
+                val data = shellConnector.captureScreen(displayId)
+                if (data != null && data.isNotEmpty()) {
+                    val bitmap = android.graphics.BitmapFactory.decodeByteArray(data, 0, data.size)
+                    if (bitmap != null) return bitmap
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Shell screenshot failed on Display $displayId", e)
+            }
         }
+
+        val accessibilityService = AutoAgentService.instance
+        if (accessibilityService != null && 
+            android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            val bitmap = accessibilityService.takeScreenshotAsync()
+            if (bitmap != null) return bitmap
+        }
+        
+        // 兜底使用主屏幕 Shell 截图
+        try {
+            val data = shellConnector.captureScreen(0)
+            if (data != null && data.isNotEmpty()) {
+                return android.graphics.BitmapFactory.decodeByteArray(data, 0, data.size)
+            }
+        } catch (e: Exception) {}
+        
+        return null
     }
 
     private suspend fun callAI(

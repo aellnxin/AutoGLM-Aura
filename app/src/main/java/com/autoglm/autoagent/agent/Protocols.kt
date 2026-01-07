@@ -20,14 +20,96 @@ enum class AgentMode {
 // ==================== 任务计划 ====================
 
 /**
+ * 步骤状态
+ */
+enum class StepStatus {
+    PENDING,      // [ ] 未完成
+    IN_PROGRESS,  // [/] 进行中
+    COMPLETED     // [x] 已完成
+}
+
+/**
+ * 任务步骤
+ */
+data class TaskStep(
+    val description: String,
+    var status: StepStatus = StepStatus.PENDING
+) {
+    fun toDisplayString(): String {
+        val marker = when (status) {
+            StepStatus.PENDING -> "[ ]"
+            StepStatus.IN_PROGRESS -> "[/]"
+            StepStatus.COMPLETED -> "[x]"
+        }
+        return "$marker $description"
+    }
+}
+
+/**
  * 任务计划
  */
 data class TaskPlan(
     val goal: String,
-    val selectedApp: String = "",    // 选择的 App
-    val steps: List<String>,
-    val notes: MutableList<String> = mutableListOf()
-)
+    val steps: MutableList<TaskStep>,
+    val notes: MutableList<String> = mutableListOf(),
+    var currentStepIndex: Int = 0  // 当前执行到第几步
+) {
+    /**
+     * 标记当前步骤为进行中
+     */
+    fun markCurrentInProgress() {
+        if (currentStepIndex < steps.size) {
+            steps[currentStepIndex].status = StepStatus.IN_PROGRESS
+        }
+    }
+    
+    /**
+     * 标记当前步骤已完成，移动到下一步
+     */
+    fun markCurrentCompleted() {
+        if (currentStepIndex < steps.size) {
+            steps[currentStepIndex].status = StepStatus.COMPLETED
+            currentStepIndex++
+            // 自动将下一步标记为进行中
+            if (currentStepIndex < steps.size) {
+                steps[currentStepIndex].status = StepStatus.IN_PROGRESS
+            }
+        }
+    }
+    
+    /**
+     * 获取当前步骤描述
+     */
+    fun getCurrentStep(): String? {
+        return if (currentStepIndex < steps.size) steps[currentStepIndex].description else null
+    }
+    
+    /**
+     * 是否所有步骤都完成
+     */
+    fun isCompleted(): Boolean = currentStepIndex >= steps.size
+    
+    /**
+     * 生成带状态的步骤列表字符串
+     */
+    fun toDisplayString(): String {
+        return steps.mapIndexed { i, step ->
+            "${i + 1}. ${step.toDisplayString()}"
+        }.joinToString("\n")
+    }
+    
+    companion object {
+        /**
+         * 从字符串列表创建 TaskPlan（兼容旧格式）
+         */
+        fun fromStringList(goal: String, stepStrings: List<String>): TaskPlan {
+            val steps = stepStrings.mapIndexed { i, desc ->
+                TaskStep(desc, if (i == 0) StepStatus.IN_PROGRESS else StepStatus.PENDING)
+            }.toMutableList()
+            return TaskPlan(goal = goal, steps = steps)
+        }
+    }
+}
 
 /**
  * 规划结果（可能是计划或询问用户）

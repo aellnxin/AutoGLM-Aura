@@ -81,7 +81,7 @@ class Orchestrator @Inject constructor(
         } catch (e: Exception) {
             Log.e(TAG, "任务规划失败", e)
             // 降级：直接作为单步任务执行
-            PlanResult.Plan(TaskPlan(goal = goal, steps = listOf(goal)))
+            PlanResult.Plan(TaskPlan.fromStringList(goal, listOf(goal)))
         }
     }
     
@@ -104,7 +104,6 @@ class Orchestrator @Inject constructor(
                 }
                 else -> {
                     // PLAN 类型
-                    val selectedApp = json.optString("selectedApp", "")
                     val stepsArray = json.optJSONArray("steps") ?: JSONArray()
                     val steps = mutableListOf<String>()
                     for (i in 0 until stepsArray.length()) {
@@ -113,17 +112,40 @@ class Orchestrator @Inject constructor(
                     if (steps.isEmpty()) {
                         steps.add(goal)
                     }
-                    PlanResult.Plan(TaskPlan(
-                        goal = goal,
-                        selectedApp = selectedApp,
-                        steps = steps
-                    ))
+                    PlanResult.Plan(TaskPlan.fromStringList(goal, steps))
                 }
             }
         } catch (e: Exception) {
             Log.w(TAG, "解析规划结果失败: ${e.message}")
             // 降级处理
-            PlanResult.Plan(TaskPlan(goal = goal, steps = listOf(goal)))
+            PlanResult.Plan(TaskPlan.fromStringList(goal, listOf(goal)))
+        }
+    }
+    
+    /**
+     * 用户回答后重新规划任务
+     * 将用户回复追加到对话历史中，让模型基于完整上下文重新规划
+     */
+    suspend fun replanWithUserAnswer(answer: String, context: ContextSnapshot): TaskPlan {
+        // 将用户回复追加到对话历史
+        conversationHistory.add(ChatMessage(
+            role = "user",
+            content = "用户补充信息: $answer\n\n请根据此信息重新规划任务步骤。"
+        ))
+
+        return try {
+            val config = settingsRepository.loadProviderConfig(ApiProvider.ZHIPU)
+            val response = aiClient.sendMessage(conversationHistory, overrideConfig = config)
+            val responseText = response.toString()
+            
+            // 将模型回复也添加到历史
+            conversationHistory.add(ChatMessage(role = "assistant", content = responseText))
+            
+            parseTaskPlan(responseText, context.goal)
+        } catch (e: Exception) {
+            Log.e(TAG, "重新规划失败", e)
+            // 降级：使用用户回复作为新步骤
+            TaskPlan.fromStringList(context.goal, listOf(answer))
         }
     }
 
@@ -249,7 +271,7 @@ class Orchestrator @Inject constructor(
 你是 Android 智能助手的任务规划专家。你的职责是将用户请求分解为可执行的子任务。
 如果任务不明确，可以询问用户澄清。
 
-【App 映射知识】
+【App 映射,不重要,只是你需要理解关系】
 - 点外卖/买奶茶/买咖啡 → 美团、饿了么、瑞幸
 - 网购/买东西 → 淘宝、京东、拼多多
 - 打车 → 滴滴、高德、百度地图
@@ -258,17 +280,32 @@ class Orchestrator @Inject constructor(
 - 搜索信息 → 浏览器、抹音、小红书
 
 【执行规则摘要（小模型会遵守，规划时需考虑）】
-1. 执行前先检查是否在目标App
+1. 执行前先检查是否在目标App,默认打开目标app
 2. 页面未加载时最多等待3次
 3. 遇到网络问题点击重新加载
 4. 找不到目标时尝试滑动查找
-5. 筛选条件可适当放宽
+5. 价格理解规则
+   (a) 单品场景（无数量词）：
+       "9.9的辣条" → 单品价格上限 9.9，下限 9.0（下浮10%）
+   
+   (b) 多品场景（有数量词 + 有价格）：
+       判断依据：是否包含"每个/单个/一个/单价"等单品关键词
+       
+       - 包含单品词："两个披萨，每个不超过50" → 单品价格≤50
+       - 不包含（默认）："两个披萨不超过50" → 总价≤50 → 推算单价≤25
+   
+   (c) 推算公式：
+       单品价格上限 = 总价上限 ÷ 数量
+       单品价格下限 = 单品价格上限 × 0.9（下浮10%）
 6. 购物车操作前先清空选中状态
 7. 外卖任务尽量在同一店铺购买
 8. 遵循用户特殊要求（如口味、价格）
 9. 确认支付前暂停等待用户
 10. 登录/验证时请求用户介入
-11. 如果用户指定了具体价格如9.9,请上下浮动10%.你输出价格应该是9-10块.
+12. 面对模糊数量词（如‘点几个外卖’、‘点一点赞’），必须根据任务风险等级进行分层处理：
+高风险/交易类（买东西、转账、发消息等任务）： 禁止自动填充数字。必须触发‘澄清机制’（ASK_USER），要求用户确认具体数量，或默认设置为最小单位（1）并停留在确认页面等待用户点击。
+反例： ‘帮忙订购几个外卖’ -> 不应直接生成订单，而应回复‘已为您打开外卖页面，请确认需要订购的具体份数’或默认选1份但在支付前强阻断。
+低风险/操作类（点赞、刷新、下滑等任务）： 设定一个符合人类行为习惯的小随机范围（如 3-8 次）的固定数字，以方便后续智能体执行。
 
 【决策类型】
 1. PLAN - 任务明确，返回步骤列表
@@ -276,7 +313,7 @@ class Orchestrator @Inject constructor(
 
 【输出格式】
 任务明确时：
-{"type": "PLAN", "selectedApp": "App名", "steps": ["步骤1", "步骤2", ...], "note": "规划说明"}
+{"type": "PLAN", "steps": ["步骤1", "步骤2", ...], "note": "规划说明"}
 
 任务不明确时：
 {"type": "ASK_USER", "question": "您想点外卖还是在淘宝买奶茶粉？"}
@@ -285,17 +322,65 @@ class Orchestrator @Inject constructor(
 
     private fun getReviewPrompt(): String {
         return """
-你是任务执行监督专家。根据小模型的执行汇报和当前截图，做出下一步决策。
+你是安卓智能体任务执行监督专家。根据用户指令、任务规划、小模型的执行汇报以及当前截图(或ui树)和执行历史，判断当前步骤是否完成，如果完成则做出下一步任务规划的决策,如果你判断未完成，请重新规划剩余任务。
+注意!请严格遵守执行规则特别是涉及到金钱方面,不要出错
 
-[当前界面截图]
+【用户指令】
+
+
+
+【任务规划】
+步骤状态说明：
+- [x] 已完成的步骤
+- [/] 当前正在执行的步骤（小模型正在处理这一步）
+- [ ] 尚未开始的步骤
+
+你的职责：判断 [/] 标记的当前步骤是否真正完成。如果完成，使用 NEXT_STEP 推进到下一步。
+
+
+
+【小模型执行汇报】
+
+
+
+【当前界面截图】
+
+
+
+【执行历史】
+
+
+
+【记录关键数据】
+
+
 
 【决策类型】
-1. NEXT_STEP - 继续执行（当前步骤OK）
-2. REPLAN - 重新规划（遇到障碍需要换路径）
-3. FINISH - 任务完成
-4. GET_INFO - 需要更多信息（使用工具）
-5. NOTE - 记录关键数据
-6. ERROR - 无法继续（说明原因）
+1. NEXT_STEP - 当前 [/] 步骤已完成，推进到下一步
+   使用场景: 当前步骤成功完成，界面状态符合预期
+   效果: 系统会自动将 [/] 标记为 [x]，并将下一个 [ ] 标记为 [/]
+   必填字段: nextStep（复制下一个 [ ] 步骤的内容）
+
+2. REPLAN - 需要重新规划路径
+   使用场景: 小模型卡在循环中 / 当前路径走不通 / 发现更优方案
+   必填字段: newSteps（新的步骤列表）, reason（重新规划的原因）
+
+3. FINISH - 任务已完成
+   使用场景: 截图显示已到达预期最终状态（如订单确认页、支付成功页）
+   必填字段: message（完成总结）
+   注意: 必须仔细核对当前界面与用户指令是否一致！
+
+4. GET_INFO - 需要更多信息来做决策
+   使用场景: 截图看不清细节 / 需要回顾历史步骤确认状态变化
+   必填字段: tool（工具名：GetUI/GetHistoryScreenshot/GetHistoryUI）
+
+5. NOTE - 记录关键数据供后续使用
+   使用场景: 发现重要信息需要跨步骤记忆（如商品价格、订单号、商品名称等）
+   必填字段: note（笔记内容）
+
+6. ERROR - 无法继续执行
+   使用场景: 遇到不可恢复的错误（如App无法打开、任务本身不可能完成）
+   必填字段: message（错误原因）
 
 【可用工具】
 - GetUI: 获取当前页面UI树
@@ -306,6 +391,8 @@ class Orchestrator @Inject constructor(
 - 连续3次相同操作无效 → REPLAN
 - 出现登录/验证弹窗 → 暂停请求用户介入
 - App崩溃 → 重新启动
+- 如果出现价格,你需要严格比对用户的目标和当前价格,如果价格过高,请根据小模型的步骤看看是那里出错了然后重新规划任务让小模型执行.
+- 如果小模型报告任务完成,你需要根据当前界面和用户的期望结果判断是否真的完成,如与用户指令和任务规划不一致,请根据小模型的步骤看看是那里出错了然后重新规划任务让小模型执行.
 
 【输出格式】
 {
@@ -323,12 +410,22 @@ class Orchestrator @Inject constructor(
 
     private fun buildReviewPrompt(report: WorkerReport, context: ContextSnapshot): String {
         return buildString {
-            append("【任务目标】${context.goal}\n\n")
+            // 【用户指令】
+            append("【用户指令】\n")
+            append(context.goal)
+            append("\n\n")
 
-            append("【当前进度】第 ${context.currentStep}/${context.totalSteps} 步\n")
-            append("当前子任务: ${report.subTask}\n\n")
+            // 【任务规划】
+            append("【任务规划】\n")
+            context.plan?.let { plan ->
+                append(plan.toDisplayString())
+                append("\n当前进度: ${plan.currentStepIndex + 1}/${plan.steps.size}\n")
+            } ?: append("(无规划)\n")
+            append("\n")
 
-            append("【执行汇报】\n")
+            // 【小模型执行汇报】
+            append("【小模型执行汇报】\n")
+            append("当前子任务: ${report.subTask}\n")
             append("状态: ${report.status}\n")
             append("执行了 ${report.stepsTaken} 步操作:\n")
             report.actions.forEachIndexed { i, action ->
@@ -340,21 +437,30 @@ class Orchestrator @Inject constructor(
             }
             append("\n")
 
+            // 【当前界面截图】
+            append("【当前界面截图】\n")
+            append("（已提供当前屏幕截图）\n")
+            append("当前App: ${context.currentApp}\n\n")
+
+            // 【执行历史】
+            append("【执行历史】\n")
             if (context.textHistory.isNotEmpty()) {
-                append("【历史记录】\n")
-                context.textHistory.takeLast(5).forEach { append("$it\n") }
-                append("\n")
+                context.textHistory.takeLast(8).forEach { append("$it\n") }
+            } else {
+                append("(暂无历史)\n")
             }
+            append("\n")
 
+            // 【记录关键数据】
+            append("【记录关键数据】\n")
             if (notes.isNotEmpty()) {
-                append("【笔记】\n")
                 notes.forEach { append("- $it\n") }
-                append("\n")
+            } else {
+                append("(暂无笔记)\n")
             }
+            append("\n")
 
-            append("【当前App】${context.currentApp}\n")
-            append("（已提供当前屏幕截图）\n\n")
-            append("请审查并决定下一步。")
+            append("请根据以上信息审查并决定下一步。")
         }
     }
 
@@ -369,10 +475,10 @@ class Orchestrator @Inject constructor(
             val stepsArray = json.optJSONArray("steps") ?: JSONArray()
             val steps = (0 until stepsArray.length()).map { stepsArray.getString(it) }
 
-            TaskPlan(goal = fallbackGoal, steps = steps.ifEmpty { listOf(fallbackGoal) })
+            TaskPlan.fromStringList(fallbackGoal, steps.ifEmpty { listOf(fallbackGoal) })
         } catch (e: Exception) {
             Log.w(TAG, "计划解析失败，使用降级", e)
-            TaskPlan(goal = fallbackGoal, steps = listOf(fallbackGoal))
+            TaskPlan.fromStringList(fallbackGoal, listOf(fallbackGoal))
         }
     }
 
@@ -405,7 +511,7 @@ class Orchestrator @Inject constructor(
                         // 如果没有指定，取下一个计划步骤
                         OrchestratorDecision(
                             type = DecisionType.NEXT_STEP,
-                            nextStep = context.plan?.steps?.getOrNull(context.currentStep) ?: "",
+                            nextStep = context.plan?.steps?.getOrNull(context.currentStep)?.description ?: "",
                             message = json.optString("reason", "")
                         )
                     } else {
@@ -464,7 +570,7 @@ class Orchestrator @Inject constructor(
             // 默认继续下一步
             OrchestratorDecision(
                 type = DecisionType.NEXT_STEP,
-                nextStep = context.plan?.steps?.getOrNull(context.currentStep) ?: "",
+                nextStep = context.plan?.steps?.getOrNull(context.currentStep)?.description ?: "",
                 message = "解析失败，默认继续"
             )
         }

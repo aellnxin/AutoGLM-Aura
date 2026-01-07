@@ -37,6 +37,11 @@ interface IAutoDroidShell {
     void releaseDisplay(int displayId);
 
     /**
+     * Inject text input
+     */
+    boolean inputText(int displayId, String text);
+
+    /**
      * Stop the user service
      */
     void destroy();

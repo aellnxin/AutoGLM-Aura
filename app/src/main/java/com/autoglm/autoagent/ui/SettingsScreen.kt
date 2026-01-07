@@ -34,6 +34,7 @@ import com.autoglm.autoagent.data.ApiConfig
 import com.autoglm.autoagent.data.ApiProvider
 import com.autoglm.autoagent.data.SettingsRepository
 import com.autoglm.autoagent.ui.theme.*
+import com.autoglm.autoagent.utils.KeepAliveUtils
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -46,7 +47,9 @@ data class PermissionStatus(
     val accessibilityGranted: Boolean = false,
     val shellServiceActive: Boolean = false,
     val overlayGranted: Boolean = false,
-    val queryPackagesGranted: Boolean = false
+    val queryPackagesGranted: Boolean = false,
+    val batteryOptimizationIgnored: Boolean = false,
+    val recordAudioGranted: Boolean = false
 ) {
     // 只要有无障碍或Shell服务其中之一，就视为拥有操作权限
     val canControlDevice: Boolean get() = accessibilityGranted || shellServiceActive
@@ -89,7 +92,11 @@ class SettingsViewModel @Inject constructor(
                 overlayGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                     Settings.canDrawOverlays(context)
                 } else true,
-                queryPackagesGranted = canQueryPackages(context)
+                queryPackagesGranted = canQueryPackages(context),
+                batteryOptimizationIgnored = KeepAliveUtils.isIgnoringBatteryOptimizations(context),
+                recordAudioGranted = androidx.core.content.ContextCompat.checkSelfPermission(
+                    context, android.Manifest.permission.RECORD_AUDIO
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
             )
             _permissionStatus.value = status
         }
@@ -146,6 +153,18 @@ class SettingsViewModel @Inject constructor(
                 intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 context.startActivity(intent)
             }
+            !status.batteryOptimizationIgnored -> {
+                // 请求忽略电池优化
+                KeepAliveUtils.requestIgnoreBatteryOptimizations(context)
+            }
+            !status.recordAudioGranted -> {
+                // 请求录音权限 (提示用户到设置或通过系统弹窗 - 这里简单跳转详情页)
+                val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                val uri = Uri.fromParts("package", context.packageName, null)
+                intent.data = uri
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(intent)
+            }
             else -> {
                 // 所有权限已授予
                 checkPermissions(context)
@@ -162,7 +181,8 @@ class SettingsViewModel @Inject constructor(
 @Composable
 fun SettingsScreen(
     viewModel: SettingsViewModel,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onNavigateToLogViewer: () -> Unit
 ) {
     val config by viewModel.config.collectAsState()
     val permissionStatus by viewModel.permissionStatus.collectAsState()
@@ -255,16 +275,13 @@ fun SettingsScreen(
                             modifier = Modifier.padding(start = 8.dp, bottom = 8.dp)
                         )
                         
-                        // 显示 Shell 服务状态（如果有）
-                        if (permissionStatus.shellServiceActive) {
-                            PermissionItem("Shell 服务 (高级模式)", true)
-                            Text(
-                                text = "• 状态: 已激活 ✅",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = TextSecondary,
-                                modifier = Modifier.padding(start = 8.dp, bottom = 8.dp)
-                            )
-                        }
+                        PermissionItem("边缘计算 / Shell 服务", permissionStatus.shellServiceActive)
+                        Text(
+                            text = if (permissionStatus.shellServiceActive) "• 状态: 已激活 ✅" else "• 状态: 未运行 (高级模式的基础，建议激活)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (permissionStatus.shellServiceActive) TextSecondary else Color.Yellow.copy(alpha=0.7f),
+                            modifier = Modifier.padding(start = 8.dp, bottom = 8.dp)
+                        )
                         
                         PermissionItem("悬浮窗权限", permissionStatus.overlayGranted)
                         Text(
@@ -276,7 +293,23 @@ fun SettingsScreen(
                         
                         PermissionItem("获取应用列表", permissionStatus.queryPackagesGranted)
                         Text(
-                            text = "• 用途: 让 AI 能启动其他应用(如\"打开拼多多\")\n• 若显示未授予，请点击下方按钮进入应用详情页手动开启“获取应用列表”权限",
+                            text = "• 用途: 让 AI 能启动其他应用(如\"打开拼多多\")",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary,
+                            modifier = Modifier.padding(start = 8.dp, bottom = 8.dp)
+                        )
+
+                        PermissionItem("忽略电池优化 (保活辅助)", permissionStatus.batteryOptimizationIgnored)
+                        Text(
+                            text = "• 用途: 防止后台执行长任务时被系统清理",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary,
+                            modifier = Modifier.padding(start = 8.dp, bottom = 8.dp)
+                        )
+
+                        PermissionItem("录音权限", permissionStatus.recordAudioGranted)
+                        Text(
+                            text = "• 用途: 支持语音指令输入",
                             style = MaterialTheme.typography.bodySmall,
                             color = TextSecondary,
                             modifier = Modifier.padding(start = 8.dp, bottom = 8.dp)
@@ -419,30 +452,12 @@ fun SettingsScreen(
                         var clickCount by remember { mutableStateOf(0) }
                         var lastClickTime by remember { mutableStateOf(0L) }
                         
-                        // 版本号行（可点击）
+                        // 版本号行（点击查看日志）
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(vertical = 8.dp)
-                                .clickable {
-                                    val currentTime = System.currentTimeMillis()
-                                    // 如果距离上次点击超过2秒，重置计数
-                                    if (currentTime - lastClickTime > 2000) {
-                                        clickCount = 1
-                                    } else {
-                                        clickCount++
-                                    }
-                                    lastClickTime = currentTime
-                                    
-                                    // 连续点击7次触发
-                                    if (clickCount >= 7) {
-                                        clickCount = 0
-                                        // TODO: 跳转到日志界面（下一步实现）
-                                        android.widget.Toast
-                                            .makeText(context, "日志已开启", android.widget.Toast.LENGTH_SHORT)
-                                            .show()
-                                    }
-                                },
+                                .clickable { onNavigateToLogViewer() },
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text(
@@ -458,6 +473,7 @@ fun SettingsScreen(
                         }
                         InfoRow("项目", "AutoDroid")
                         InfoRow("开源", "GitHub")
+                        InfoRow("作者", "AellXin")
                     }
                 )
 

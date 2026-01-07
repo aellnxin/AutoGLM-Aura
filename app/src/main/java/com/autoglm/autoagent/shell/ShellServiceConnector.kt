@@ -1,168 +1,126 @@
 package com.autoglm.autoagent.shell
 
 import android.util.Log
-import java.io.DataInputStream
-import java.io.DataOutputStream
-import java.net.InetSocketAddress
-import java.net.Socket
-import java.nio.charset.StandardCharsets
+import com.autoglm.autoagent.shizuku.ShizukuManager
 import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Shell Service Connector (TCP Socket Version)
+ * Shell Service Connector (AIDL Version)
  * 
- * Connects to TCP Socket on localhost:23456
- * Protocol matches ServerMain.java
+ * Communicates with AutoDroidUserService via AIDL.
  */
 @Singleton
 class ShellServiceConnector @Inject constructor(
-    private val deployer: ShellServiceDeployer
+    private val shizukuManager: ShizukuManager
 ) {
-    
-    private val token: String
-        get() = deployer.getOrGenerateToken()
-        
-    private val PORT = 23456
-    private val HOST = "127.0.0.1"
-    private val TIMEOUT_MS = 3000
-    
-    // Command IDs
-    private val CMD_PING = 1
-    private val CMD_INJECT_TOUCH = 2
-    private val CMD_INJECT_KEY = 3
-    private val CMD_CAPTURE_SCREEN = 4
-    private val CMD_CREATE_DISPLAY = 5
-    private val CMD_RELEASE_DISPLAY = 6
-    private val CMD_START_ACTIVITY = 7
-    private val CMD_DESTROY = 99
+    private val TAG = "ShellServiceConnector"
 
-    /**
-     * Helper to send command and get response
-     */
-    private fun <T> sendCommand(
-        cmd: Int,
-        payloadWriter: (DataOutputStream, DataInputStream) -> T
-    ): T? {
-        var socket: Socket? = null
-        try {
-            socket = Socket()
-            socket.connect(InetSocketAddress(HOST, PORT), TIMEOUT_MS)
-            socket.soTimeout = TIMEOUT_MS
-            
-            val out = DataOutputStream(socket.outputStream)
-            val input = DataInputStream(socket.inputStream)
-            
-            // 1. Send Token
-            val tokenBytes = token.toByteArray(StandardCharsets.UTF_8)
-            out.writeInt(tokenBytes.size)
-            out.write(tokenBytes)
-            out.flush() // Ensure token is sent immediately
-            
-            // 2. Send Command ID
-            out.writeInt(cmd)
-            out.flush()
-            
-            // 3. Read Status
-            val status = input.readInt()
-            if (status != 1) {
-                Log.e(TAG, "Server rejected request (Status: $status)")
-                return null
-            }
-            
-            // 4. Send Payload & Read Response
-            return payloadWriter(out, input)
-            
-        } catch (e: Exception) {
-            Log.e(TAG, "Socket communication failed", e)
-            return null
-        } finally {
-            try {
-                socket?.close()
-            } catch (e: Exception) { /* Ignore */ }
+    private fun getService(): IAutoDroidShell? {
+        val service = shizukuManager.getService()
+        if (service == null) {
+            Log.w(TAG, "Shell Service not connected")
         }
+        return service
     }
     
     /**
      * Test connection to Shell Service
      */
     fun connect(): Boolean {
-        return sendCommand(CMD_PING) { _, _ -> true } ?: false
+        return try {
+            getService()?.ping() ?: false
+        } catch (e: Exception) {
+            Log.e(TAG, "ping failed", e)
+            false
+        }
+    }
+
+    /**
+     * Ensure connection is established (re-bind if necessary)
+     */
+    fun ensureConnection(): Boolean {
+        return shizukuManager.ensureConnected()
     }
 
     fun injectTouch(displayId: Int, action: Int, x: Int, y: Int): Boolean {
-        return sendCommand(CMD_INJECT_TOUCH) { out, input ->
-            out.writeInt(displayId)
-            out.writeInt(action)
-            out.writeInt(x)
-            out.writeInt(y)
-            out.flush()
-            input.readBoolean()
-        } ?: false
+        return try {
+            getService()?.injectTouch(displayId, action, x, y) ?: false
+        } catch (e: Exception) {
+            Log.e(TAG, "injectTouch failed", e)
+            false
+        }
     }
     
     fun injectKey(keyCode: Int): Boolean {
-        return sendCommand(CMD_INJECT_KEY) { out, input ->
-            out.writeInt(keyCode)
-            out.flush()
-            input.readBoolean()
-        } ?: false
+        return try {
+            getService()?.injectKey(keyCode) ?: false
+        } catch (e: Exception) {
+            Log.e(TAG, "injectKey failed", e)
+            false
+        }
+    }
+
+    fun inputText(displayId: Int, text: String): Boolean {
+        return try {
+            getService()?.inputText(displayId, text) ?: false
+        } catch (e: Exception) {
+            Log.e(TAG, "inputText failed", e)
+            false
+        }
     }
     
-    fun captureScreen(displayId: Int): String? {
-        return sendCommand(CMD_CAPTURE_SCREEN) { out, input ->
-            out.writeInt(displayId)
-            out.flush()
-            val path = input.readUTF()
-            if (path.isEmpty()) null else path
+    fun captureScreen(displayId: Int): ByteArray? {
+        return try {
+            getService()?.captureScreen(displayId)
+        } catch (e: Exception) {
+            Log.e(TAG, "captureScreen failed", e)
+            null
         }
     }
     
     /**
      * Create a VirtualDisplay for background execution
-     * @return displayId or -1 on failure
      */
     fun createVirtualDisplay(name: String, width: Int, height: Int, density: Int): Int {
-        return sendCommand(CMD_CREATE_DISPLAY) { out, input ->
-            out.writeUTF(name)
-            out.writeInt(width)
-            out.writeInt(height)
-            out.writeInt(density)
-            out.flush()
-            input.readInt()
-        } ?: -1
+        return try {
+            getService()?.createVirtualDisplay(name, width, height, density) ?: -1
+        } catch (e: Exception) {
+            Log.e(TAG, "createVirtualDisplay failed", e)
+            -1
+        }
     }
     
     /**
      * Release a VirtualDisplay
      */
     fun releaseDisplay(displayId: Int): Boolean {
-        return sendCommand(CMD_RELEASE_DISPLAY) { out, input ->
-            out.writeInt(displayId)
-            out.flush()
-            input.readBoolean()
-        } ?: false
+        return try {
+            getService()?.releaseDisplay(displayId)
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "releaseDisplay failed", e)
+            false
+        }
     }
     
     /**
      * Start an activity on specific display
      */
     fun startActivityOnDisplay(displayId: Int, packageName: String): Boolean {
-        return sendCommand(CMD_START_ACTIVITY) { out, input ->
-            out.writeInt(displayId)
-            out.writeUTF(packageName)
-            out.flush()
-            input.readBoolean()
-        } ?: false
-    }
-    
-    fun destroy() {
-        sendCommand(CMD_DESTROY) { _, input ->
-            input.readBoolean()
+        return try {
+            getService()?.startActivity(displayId, packageName) ?: false
+        } catch (e: Exception) {
+            Log.e(TAG, "startActivity failed", e)
+            false
         }
     }
     
-    companion object {
-        private const val TAG = "ShellServiceConnector"
+    fun destroy() {
+        try {
+            getService()?.destroy()
+        } catch (e: Exception) {
+            Log.e(TAG, "destroy failed", e)
+        }
     }
 }

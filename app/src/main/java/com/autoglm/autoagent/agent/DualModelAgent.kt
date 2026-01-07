@@ -111,9 +111,22 @@ class DualModelAgent @Inject constructor(
                 is PlanResult.AskUser -> {
                     // 需要询问用户澄清
                     log("❓ [规划] 需要澄清: ${planResult.question}")
-                    _statusMessage.value = ""
-                    _isRunning.value = false
-                    return TaskResult.Error("需要澄清: ${planResult.question}")
+                    _pendingQuestion.value = planResult.question
+                    _statusMessage.value = "❓ 等待回复..."
+                    
+                    // 等待用户通过 UI 注入回答
+                    val answer = waitForUserAnswer()
+                    _pendingQuestion.value = null
+                    
+                    if (answer.isNotBlank()) {
+                        log("📝 收到回复: $answer，正在重新规划...")
+                        // 使用用户提供的回答作为新目标或附加信息重新规划
+                        // 这里我们简化处理：将原目标与回答合并后重试规划逻辑
+                        return startTask("$goal (补充信息: $answer)")
+                    } else {
+                        log("❌ 任务取消 (未提供澄清回答)")
+                        return TaskResult.Cancelled
+                    }
                 }
                 is PlanResult.Plan -> {
                     val plan = planResult.plan

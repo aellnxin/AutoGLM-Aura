@@ -1,6 +1,7 @@
 package com.autoglm.autoagent.shell
 
 import android.content.Context
+import android.util.Log
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import androidx.lifecycle.ViewModel
@@ -20,7 +21,6 @@ import javax.inject.Inject
  */
 data class ShellActivationUiState(
     val isServiceRunning: Boolean = false,
-    val needsPairing: Boolean = false, // 回退版默认不显示配对卡片
     val activationCommand: String = "",
     val shizukuStatus: ActivationStatus = ActivationStatus.NOT_INSTALLED,
     val isLoading: Boolean = false,
@@ -35,7 +35,6 @@ class ShellServiceActivationViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val deployer: ShellServiceDeployer,
     private val connector: ShellServiceConnector,
-    private val adbLauncher: AdbServiceLauncher,
     private val shizukuManager: ShizukuManager,
     private val agentRepository: com.autoglm.autoagent.data.AgentRepository
 ) : ViewModel() {
@@ -44,17 +43,21 @@ class ShellServiceActivationViewModel @Inject constructor(
     val state: StateFlow<ShellActivationUiState> = _state
     
     init {
-        // 确保 DEX 已部署并生成命令
+        // 观察服务连接状态
         viewModelScope.launch {
-            if (!deployer.isDeployed()) {
-                deployer.deployServerDex()
+            shizukuManager.isServiceConnected.collect { connected ->
+                _state.value = _state.value.copy(
+                    isServiceRunning = connected, 
+                    isLoading = false
+                )
             }
-            _state.value = _state.value.copy(
-                activationCommand = deployer.getActivationCommand()
-            )
         }
         
-        checkServiceStatus()
+        // 引导命令仍保留 deployer 生成（用于展示）
+        _state.value = _state.value.copy(
+            activationCommand = deployer.getActivationCommand()
+        )
+        
         updateShizukuStatus()
     }
     
@@ -65,16 +68,7 @@ class ShellServiceActivationViewModel @Inject constructor(
     }
     
     fun checkServiceStatus() {
-        viewModelScope.launch {
-            val connected = withContext(Dispatchers.IO) {
-                connector.connect()
-            }
-            
-            _state.value = _state.value.copy(
-                isLoading = false,
-                isServiceRunning = connected
-            )
-        }
+        // 现在通过 init 中的 collect 自动更新
     }
     
     fun launchService() {
@@ -83,34 +77,14 @@ class ShellServiceActivationViewModel @Inject constructor(
             
             val status = shizukuManager.getActivationStatus()
             if (status == ActivationStatus.ACTIVATED) {
-                // 1. 先尝试静默保活注入 (不需要 UI 输出)
-                agentRepository.ensureKeepAlive(silent = true)
-                
-                // 2. 启动服务逻辑
-                val command = deployer.getActivationCommand()
-                val success = withContext(Dispatchers.IO) {
-                    shizukuManager.runCommand(command)
-                }
-                
-                if (success) {
-                    // 等待服务启动并尝试连接
-                    repeat(5) {
-                        delay(1000)
-                        if (connector.connect()) {
-                            _state.value = _state.value.copy(isServiceRunning = true, isLoading = false)
-                            return@launch
-                        }
-                    }
+                val success = shizukuManager.bindService()
+                if (!success) {
                     _state.value = _state.value.copy(
                         isLoading = false,
-                        errorMessage = "服务已启动但连接超时，请重试"
-                    )
-                } else {
-                    _state.value = _state.value.copy(
-                        isLoading = false,
-                        errorMessage = "通过 Shizuku 启动失败，请检查 Shizuku 状态"
+                        errorMessage = "绑定 Shizuku 用户服务失败，请检查 Shizuku 是否正常"
                     )
                 }
+                // 连接成功后的状态由 collect 处理
             } else {
                 _state.value = _state.value.copy(
                     isLoading = false,
@@ -125,16 +99,13 @@ class ShellServiceActivationViewModel @Inject constructor(
             val result = withContext(Dispatchers.IO) {
                 connector.injectKey(4) // BACK key
             }
-            android.util.Log.d("ShellService", "Test result: $result")
+            Log.d("ShellService", "Test result: $result")
         }
     }
     
     fun stopService() {
         viewModelScope.launch {
-            withContext(Dispatchers.IO) {
-                connector.destroy()
-            }
-            checkServiceStatus()
+            shizukuManager.unbindService()
         }
     }
 }

@@ -124,7 +124,7 @@ fun LogViewerScreen(
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = "暂无日志\n\n连续点击版本号7次可以开启日志",
+                    text = "暂无日志\n\n日志会在任务执行时自动记录",
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

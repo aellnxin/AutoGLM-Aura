@@ -86,10 +86,7 @@ android {
     }
 }
 
-// 确保 server.dex 在 app 构建前生成
-tasks.named("preBuild").configure {
-    dependsOn(":server:buildServerDex")
-}
+// 移除旧的 server.dex 构建逻辑，高级模式已迁移至 Shizuku Binder 模式
 
 dependencies {
     implementation(libs.androidx.core.ktx)
@@ -101,6 +98,11 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
     implementation("androidx.compose.material:material-icons-extended")
+    
+    // 强制对齐 Animation 版本以修复 CircularProgressIndicator 崩溃
+    implementation("androidx.compose.animation:animation:1.6.7")
+    implementation("androidx.compose.animation:animation-core:1.6.7")
+    implementation("androidx.compose.animation:animation-graphics:1.6.7")
     
     // Hilt
     implementation(libs.hilt.android)
@@ -124,6 +126,9 @@ dependencies {
     // Shizuku（高级模式）
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")
+    
+    // Hidden API Bypass (允许反射系统私有API)
+    implementation("org.lsposed.hiddenapibypass:hiddenapibypass:4.3")
     
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
