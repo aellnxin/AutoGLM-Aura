@@ -362,6 +362,22 @@ class AgentRepository @Inject constructor(
                     addUiMessage("system", "🖥️ 后台隔离运行已开启 (ID: $displayId)")
                     Log.i("Agent", "Created VirtualDisplay: $displayId")
                     
+                    // 启动虚拟屏幕浮窗预览服务
+                    try {
+                        val floatIntent = Intent(context, com.autoglm.autoagent.service.VirtualDisplayFloatingService::class.java).apply {
+                            action = com.autoglm.autoagent.service.VirtualDisplayFloatingService.ACTION_SHOW
+                            putExtra(com.autoglm.autoagent.service.VirtualDisplayFloatingService.EXTRA_DISPLAY_ID, displayId)
+                        }
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                            context.startForegroundService(floatIntent)
+                        } else {
+                            context.startService(floatIntent)
+                        }
+                        Log.i("Agent", "VirtualDisplayFloatingService started for display $displayId")
+                    } catch (e: Exception) {
+                        Log.e("Agent", "Failed to start VD floating service", e)
+                    }
+                    
                     // 核心修复：先初始化执行器，再设置 DisplayId
                     fallbackExecutor.initialize(defaultScreenWidth, defaultScreenHeight)
                     fallbackExecutor.setDisplayId(displayId)
@@ -631,6 +647,21 @@ class AgentRepository @Inject constructor(
                     return
                 }
             }
+        } catch (e: com.autoglm.autoagent.executor.ShizukuExecutionException) {
+            // Shizuku 服务异常 - 直接结束任务并通过通知栏报告
+            Log.e("Agent", "Shizuku service execution failed", e)
+            val errorMsg = "❌ Shizuku 服务异常: ${e.message}"
+            addUiMessage("system", errorMsg)
+            
+            // 通过通知栏报告
+            taskNotificationManager.showErrorNotification(
+                "任务异常终止",
+                "Shizuku 服务执行失败: ${e.message?.take(100) ?: "Unknown error"}"
+            )
+            
+            _agentState.value = AgentState.Error(e.message ?: "Shizuku service failed")
+            delay(TimingConfig.Task.ERROR_DELAY)
+            _agentState.value = AgentState.Idle
         } catch (e: Exception) {
             // Handle normal cancellation separately - not an error
             if (e is kotlinx.coroutines.CancellationException) {

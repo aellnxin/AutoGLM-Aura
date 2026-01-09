@@ -60,16 +60,54 @@ class ShellServiceConnector @Inject constructor(
             false
         }
     }
+    
+    /**
+     * 在指定 displayId 上按键（用于虚拟屏幕后台执行）
+     */
+    fun pressKeyOnDisplay(displayId: Int, keyCode: Int): Boolean {
+        if (displayId <= 0) {
+            return injectKey(keyCode)
+        }
+        
+        return try {
+            // 使用 shell 命令发送按键到指定屏幕
+            val service = getService() ?: return false
+            val cmd = "input --display $displayId keyevent $keyCode"
+            Log.d(TAG, "Executing: $cmd")
+            
+            // 通过 Shizuku 执行 shell 命令
+            val method = try {
+                rikka.shizuku.Shizuku::class.java.getDeclaredMethod(
+                    "newProcess", Array<String>::class.java, Array<String>::class.java, String::class.java
+                )
+            } catch (e: NoSuchMethodException) {
+                rikka.shizuku.Shizuku::class.java.getDeclaredMethod(
+                    "newProcess", Array<String>::class.java, Array<String>::class.java
+                )
+            }.apply { isAccessible = true }
+            
+            val process = if (method.parameterCount == 3) {
+                method.invoke(null, arrayOf("sh", "-c", cmd), null, null)
+            } else {
+                method.invoke(null, arrayOf("sh", "-c", cmd), null)
+            } as Process
+            
+            process.waitFor() == 0
+        } catch (e: Exception) {
+            Log.e(TAG, "pressKeyOnDisplay failed", e)
+            false
+        }
+    }
 
     /**
      * Press Home key (KEYCODE_HOME = 3)
      */
-    fun pressHome(): Boolean = injectKey(3)
+    fun pressHome(displayId: Int = 0): Boolean = pressKeyOnDisplay(displayId, 3)
 
     /**
      * Press Back key (KEYCODE_BACK = 4)
      */
-    fun pressBack(): Boolean = injectKey(4)
+    fun pressBack(displayId: Int = 0): Boolean = pressKeyOnDisplay(displayId, 4)
 
     fun inputText(displayId: Int, text: String): Boolean {
         return try {

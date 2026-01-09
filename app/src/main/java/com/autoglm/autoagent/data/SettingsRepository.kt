@@ -173,5 +173,57 @@ class SettingsRepository @Inject constructor(
      * 获取当前 Agent 模式
      */
     fun getAgentMode(): com.autoglm.autoagent.agent.AgentMode = _agentMode.value
+    
+    // ==================== 虚拟屏幕浮窗设置 ====================
+    
+    private val _virtualDisplayFloatEnabled = MutableStateFlow(loadVirtualDisplayFloatEnabled())
+    val virtualDisplayFloatEnabled: StateFlow<Boolean> = _virtualDisplayFloatEnabled.asStateFlow()
+    
+    private fun loadVirtualDisplayFloatEnabled(): Boolean {
+        return oldPrefs.getBoolean("virtual_display_float_enabled", true)
+    }
+    
+    fun setVirtualDisplayFloatEnabled(enabled: Boolean) {
+        oldPrefs.edit().putBoolean("virtual_display_float_enabled", enabled).apply()
+        _virtualDisplayFloatEnabled.value = enabled
+    }
+    
+    // ==================== 语音唤醒设置 ====================
+    
+    private val _wakeWordEnabled = MutableStateFlow(loadWakeWordEnabled())
+    val wakeWordEnabled: StateFlow<Boolean> = _wakeWordEnabled.asStateFlow()
+    
+    private val _customWakeWord = MutableStateFlow(loadCustomWakeWord())
+    val customWakeWord: StateFlow<String> = _customWakeWord.asStateFlow()
+    
+    private val _wakeWordPowerSaving = MutableStateFlow(loadWakeWordPowerSaving())
+    val wakeWordPowerSaving: StateFlow<Boolean> = _wakeWordPowerSaving.asStateFlow()
+    
+    private fun loadWakeWordEnabled(): Boolean {
+        return oldPrefs.getBoolean("wake_word_enabled", false)
+    }
+    
+    fun setWakeWordEnabled(enabled: Boolean) {
+        oldPrefs.edit().putBoolean("wake_word_enabled", enabled).apply()
+        _wakeWordEnabled.value = enabled
+    }
+    
+    private fun loadCustomWakeWord(): String {
+        return oldPrefs.getString("custom_wake_word", "你好小光") ?: "你好小光"
+    }
+    
+    fun setCustomWakeWord(wakeWord: String) {
+        oldPrefs.edit().putString("custom_wake_word", wakeWord).apply()
+        _customWakeWord.value = wakeWord
+    }
+    
+    private fun loadWakeWordPowerSaving(): Boolean {
+        return oldPrefs.getBoolean("wake_word_power_saving", true)
+    }
+    
+    fun setWakeWordPowerSaving(enabled: Boolean) {
+        oldPrefs.edit().putBoolean("wake_word_power_saving", enabled).apply()
+        _wakeWordPowerSaving.value = enabled
+    }
 }
 

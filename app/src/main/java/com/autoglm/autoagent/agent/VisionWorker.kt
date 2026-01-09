@@ -543,6 +543,10 @@ class VisionWorker @Inject constructor(
                     false
                 }
             }
+        } catch (e: com.autoglm.autoagent.executor.ShizukuExecutionException) {
+            // Shizuku 服务异常，直接抛出让上层处理（结束任务并通知）
+            Log.e(TAG, "Shizuku 服务执行异常: ${e.message}", e)
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "执行失败: $actionName", e)
             false

@@ -10,6 +10,8 @@
         tools:ignore="QueryAllPackagesPermission" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <application
         android:name=".AutoGLMApplication"
@@ -68,6 +70,24 @@
             android:exported="false"/>
 
         <service android:name=".service.FloatingWindowService" />
+
+        <!-- 虚拟屏幕浮窗服务（仅显示预览，不需要 MediaProjection） -->
+        <service 
+            android:name=".service.VirtualDisplayFloatingService"
+            android:foregroundServiceType="specialUse"
+            android:enabled="true"
+            android:exported="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="virtualDisplayPreview"/>
+        </service>
+
+        <!-- 语音唤醒服务 -->
+        <service 
+            android:name=".service.WakeWordService"
+            android:foregroundServiceType="microphone"
+            android:enabled="true"
+            android:exported="false"/>
 
         <!-- Shizuku Provider（高级模式支持） -->
         <provider

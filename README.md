@@ -69,12 +69,12 @@ flowchart LR
     end
 
     subgraph Execution Layer
-        I --> K[FallbackActionExecutor]
+        I --> K[ActionExecutorManager]
         J --> K
-        K --> L{Shizuku Available?}
-        L -->|Yes| M[Shizuku Service - Binder Injection]
+        K --> L{Shell Mode?}
+        L -->|Yes| M[Shizuku Process Service]
         L -->|No| N[Accessibility Service]
-        M --> O[📱 Android UI]
+        M -->|Binder| O[📱 Android UI / Virtual Screen]
         N --> O
     end
 ```
@@ -115,9 +115,11 @@ Location: `app/src/main/java/com/autoglm/autoagent/service/AutoAgentService.kt`
 Location: `app/src/main/java/com/autoglm/autoagent/shell/AutoGLM-AuraUserService.kt`
 
 The core services for automation:
-- **Accessibility Service**: Used for UI tree analysis and basic gestures.
-- **Advanced Shizuku Service**: Binder-level interaction for high-performance input injection and virtual display management.
-- **Virtual Display**: Allows background task execution without主屏幕 (main screen) interference.
+- **Accessibility Service**: Used for UI tree analysis and basic gestures (Fallback/Assistive).
+- **Shizuku Isolated Service**: 
+    - Runs in a separate `app:shell` process with genuine Shell permissions.
+    - Communicates via AIDL/Binder for high-performance InputManager injection and VirtualDisplay management.
+- **Virtual Display**: Allows background task execution without interfering with the main screen.
 
 ```kotlin
 // Main Functions
@@ -198,14 +200,14 @@ Due to individual development with limited equipment and time, the project has o
 
 - [x] ~~Online Voice Recognition~~ - Upgraded to Sherpa-ONNX (Offline)
 - [x] **Advanced Mode** - Shizuku integration & Virtual Screen background execution
+- [x] **Service Process Refactoring** - Isolated Shizuku Process for stability and permissions
 - [x] **Dual Model Architecture** - Turbo (Fast) and Deep (Reasoning) modes
 - [x] **UI Polish & Animations** - Premium Glassmorphism design
-- [ ] Task History
-- [ ] Custom Shortcuts
-- [x] Performance & Stability Improvements (Shizuku Binder Bridge)
-- [ ] Multi-language Support (In-App)
-- [ ] Virtual Screen Floating Window (Preview background tasks)
-- [ ] Voice Wake-up (Hotword detection)
+- [x] **Task History** - Keep track of recent tasks
+- [x] **Performance & Stability Improvements** (Shizuku Binder Bridge)
+- [x] **Virtual Screen Floating Window** - Real-time preview of background tasks (Beta)
+- [x] **Voice Wake-up** - Hotword detection via Sherpa-ONNX (Beta)
+- [ ] **User Preference Learning** - Basic behavior recording (Experimental)
 
 ## Third-party Components and Referenced Projects
 

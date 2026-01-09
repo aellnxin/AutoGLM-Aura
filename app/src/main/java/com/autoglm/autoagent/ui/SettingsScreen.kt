@@ -64,11 +64,42 @@ class SettingsViewModel @Inject constructor(
     
     val agentMode = repository.agentMode.stateIn(viewModelScope, SharingStarted.Lazily, com.autoglm.autoagent.agent.AgentMode.TURBO)
     
+    // 语音唤醒状态
+    val wakeWordEnabled = repository.wakeWordEnabled.stateIn(viewModelScope, SharingStarted.Lazily, false)
+    val customWakeWord = repository.customWakeWord.stateIn(viewModelScope, SharingStarted.Lazily, "你好小光")
+    val wakeWordPowerSaving = repository.wakeWordPowerSaving.stateIn(viewModelScope, SharingStarted.Lazily, true)
+    
     private val _permissionStatus = MutableStateFlow(PermissionStatus())
     val permissionStatus = _permissionStatus.asStateFlow()
     
     fun saveAgentMode(mode: com.autoglm.autoagent.agent.AgentMode) {
         repository.saveAgentMode(mode)
+    }
+    
+    fun setWakeWordEnabled(context: Context, enabled: Boolean) {
+        repository.setWakeWordEnabled(enabled)
+        
+        // 启动或停止语音唤醒服务
+        val intent = android.content.Intent(context, com.autoglm.autoagent.service.WakeWordService::class.java)
+        if (enabled) {
+            intent.action = com.autoglm.autoagent.service.WakeWordService.ACTION_START
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        } else {
+            intent.action = com.autoglm.autoagent.service.WakeWordService.ACTION_STOP
+            context.startService(intent)
+        }
+    }
+    
+    fun setCustomWakeWord(wakeWord: String) {
+        repository.setCustomWakeWord(wakeWord)
+    }
+    
+    fun setWakeWordPowerSaving(enabled: Boolean) {
+        repository.setWakeWordPowerSaving(enabled)
     }
 
     fun saveConfig(provider: ApiProvider, baseUrl: String, apiKey: String, model: String) {
@@ -371,6 +402,89 @@ fun SettingsScreen(
                             color = TextSecondary,
                             modifier = Modifier.padding(start = 4.dp)
                         )
+                    }
+                )
+
+                // 语音唤醒设置
+                SettingsCard(
+                    title = "🎤 语音唤醒",
+                    content = {
+                        val wakeWordEnabled by viewModel.wakeWordEnabled.collectAsState()
+                        val customWakeWord by viewModel.customWakeWord.collectAsState()
+                        val powerSavingMode by viewModel.wakeWordPowerSaving.collectAsState()
+                        
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "启用语音唤醒",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = TextPrimary
+                                )
+                                Text(
+                                    "说唤醒词激活助手",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = TextSecondary
+                                )
+                            }
+                            Switch(
+                                checked = wakeWordEnabled,
+                                onCheckedChange = { viewModel.setWakeWordEnabled(context, it) },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = PrimaryBlue,
+                                    checkedTrackColor = PrimaryBlue.copy(alpha = 0.5f)
+                                )
+                            )
+                        }
+                        
+                        if (wakeWordEnabled) {
+                            Spacer(modifier = Modifier.height(16.dp))
+                            
+                            var editingWakeWord by remember { mutableStateOf(customWakeWord) }
+                            LaunchedEffect(customWakeWord) { editingWakeWord = customWakeWord }
+                            
+                            DarkTextField(
+                                value = editingWakeWord,
+                                onValueChange = { 
+                                    editingWakeWord = it
+                                    viewModel.setCustomWakeWord(it)
+                                },
+                                label = "自定义唤醒词",
+                                placeholder = "例如: 你好小光"
+                            )
+                            
+                            Spacer(modifier = Modifier.height(16.dp))
+                            
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        "省电模式",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = TextPrimary
+                                    )
+                                    Text(
+                                        "仅屏幕亮起时监听",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = TextSecondary
+                                    )
+                                }
+                                Switch(
+                                    checked = powerSavingMode,
+                                    onCheckedChange = { viewModel.setWakeWordPowerSaving(it) },
+                                    colors = SwitchDefaults.colors(
+                                        checkedThumbColor = PrimaryBlue,
+                                        checkedTrackColor = PrimaryBlue.copy(alpha = 0.5f)
+                                    )
+                                )
+                            }
+                        }
                     }
                 )
 

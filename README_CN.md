@@ -69,12 +69,12 @@ flowchart LR
     end
 
     subgraph 执行层
-        I --> K[FallbackActionExecutor]
+        I --> K[ActionExecutorManager]
         J --> K
-        K --> L{Shizuku 可用?}
-        L -->|是| M[Shizuku 服务 - Binder 注入]
+        K --> L{Shell 模式?}
+        L -->|是| M[Shizuku 独立进程服务]
         L -->|否| N[无障碍服务]
-        M --> O[📱 Android UI]
+        M -->|Binder| O[📱 Android UI / 虚拟屏幕]
         N --> O
     end
 ```
@@ -115,8 +115,10 @@ flowchart LR
 位置: `app/src/main/java/com/autoglm/autoagent/shell/AutoGLM-AuraUserService.kt`
 
 自动化的核心服务:
-- **无障碍服务**: 用于 UI 树分析和基础手势。
-- **高级 Shizuku 服务**: 基于 Binder 桥接的系统级交互，支持高频点击注入和虚拟屏幕管理。
+- **无障碍服务**: 用于 UI 树分析和基础手势 (降级/辅助模式)。
+- **Shizuku 独立进程服务**: 
+    - 运行在独立的 `app:shell` 进程中，拥有真正的 Shell 权限。
+    - 通过 Binder 与主进程通信，负责高性能点击注入和 InputManager 管理。
 - **后台隔离**: 通过创建虚拟屏幕，支持在不占用用户主屏幕的情况下执行任务。
 
 ```kotlin
@@ -197,12 +199,11 @@ max_tokens: 3000
 - [x] **双模型架构** - 支持极速 (Turbo) 与思考 (Deep) 双模式
 - [x] **虚拟屏幕** - 支持通过虚拟屏幕在后台执行任务，主屏操作不受干扰
 - [x] **任务历史记录** - 保留最近3次任务详情 
-- [ ] 自定义快捷指令
-- [x] **UI 优化与动画**
 - [x] **性能与稳定性优化** (基于 Shizuku Binder 桥接)
-- [ ] 多语言支持 (应用内)
-- [ ] 增加虚拟屏幕的浮窗
-- [ ] 语音唤醒
+- [x] **服务进程重构** - AutoGLMAuraUserService 独立运行于 Shizuku 进程，解决权限问题并移除降级逻辑
+- [x] **虚拟屏幕浮窗** - 实时预览后台任务状态 (Beta)
+- [x] **语音唤醒** - 支持 "你好助手" 关键词唤醒 (Beta)
+- [ ] **用户偏好学习** - 基础的用户行为记录与匹配 (Experimental)
 
 ## 第三方组件与参考项目
 

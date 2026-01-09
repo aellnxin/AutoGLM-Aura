@@ -71,8 +71,10 @@ class ShizukuManager @Inject constructor(
 
     /**
      * 确保服务已连接，若未连接则尝试静默重连
+     * 注意：bindUserService 是异步的，这里会等待连接完成
      */
     fun ensureConnected(): Boolean {
+        // 1. 检查是否已连接
         if (userService != null && isShizukuRunning()) {
             try {
                 if (userService?.ping() == true) return true
@@ -80,28 +82,90 @@ class ShizukuManager @Inject constructor(
                 Log.w("ShizukuManager", "Service ping failed, attempting reconnect")
             }
         }
-        return bindService()
+        
+        // 2. 尝试绑定
+        if (!bindService()) {
+            return false
+        }
+        
+        // 3. 等待连接完成 (最多 3 秒)
+        val startTime = System.currentTimeMillis()
+        val timeout = 3000L
+        while (!_isServiceConnected.value && (System.currentTimeMillis() - startTime) < timeout) {
+            Thread.sleep(100)
+        }
+        
+        val connected = _isServiceConnected.value
+        if (!connected) {
+            Log.w("ShizukuManager", "⚠️ Service bind timeout after ${timeout}ms")
+        }
+        return connected
+    }
+    
+    // Shizuku UserService 参数
+    private var userServiceArgs: Shizuku.UserServiceArgs? = null
+    
+    // ServiceConnection 用于接收服务绑定回调
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            Log.d("ShizukuManager", "✅ UserService connected: $name")
+            if (service != null && service.pingBinder()) {
+                userService = IAutoGLMAuraShell.Stub.asInterface(service)
+                _isServiceConnected.value = true
+                
+                // 设置死亡监听
+                try {
+                    service.linkToDeath(deathRecipient, 0)
+                } catch (e: Exception) {
+                    Log.w("ShizukuManager", "Failed to link death recipient", e)
+                }
+            } else {
+                Log.e("ShizukuManager", "❌ Service binder is null or dead")
+                _isServiceConnected.value = false
+            }
+        }
+        
+        override fun onServiceDisconnected(name: ComponentName?) {
+            Log.w("ShizukuManager", "⚠️ UserService disconnected: $name")
+            userService = null
+            _isServiceConnected.value = false
+        }
+    }
+    
+    // 服务死亡监听
+    private val deathRecipient = IBinder.DeathRecipient {
+        Log.e("ShizukuManager", "💀 UserService process died!")
+        userService = null
+        _isServiceConnected.value = false
     }
     
     /**
-     * 在本地进程初始化 Binder 包装服务 (Ruto-GLM 模式)
+     * 绑定 Shizuku UserService（运行在 Shizuku 进程中）
      */
     fun bindService(): Boolean {
         if (!hasPermission()) {
-            Log.e("ShizukuManager", "Cannot connect: No Shizuku permission")
+            Log.e("ShizukuManager", "Cannot bind: No Shizuku permission")
             return false
         }
         
         return try {
-            Log.d("ShizukuManager", "🚀 Initializing Direct Binder Shell...")
-            // 直接在当前进程创建服务实例
-            // 由于该实例内部使用了 ShizukuBinderWrapper，它发出的所有请求都将带有 Shizuku 权限
-            userService = com.autoglm.autoagent.shell.AutoGLMAuraUserService(context)
-            _isServiceConnected.value = true
-            Log.d("ShizukuManager", "✅ Direct Binder Shell initialized")
+            Log.d("ShizukuManager", "🚀 Binding UserService in Shizuku process...")
+            
+            // 创建 UserService 参数
+            userServiceArgs = Shizuku.UserServiceArgs(
+                ComponentName(context, com.autoglm.autoagent.shell.AutoGLMAuraUserService::class.java)
+            )
+                .daemon(false)  // 非守护进程，app 退出时服务也退出
+                .processNameSuffix("shell")  // 进程名后缀
+                .debuggable(android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O && android.os.StrictMode.allowThreadDiskReads() != null)
+                .version(1)  // 版本号，更新服务时增加
+            
+            // 绑定服务
+            Shizuku.bindUserService(userServiceArgs!!, serviceConnection)
+            Log.d("ShizukuManager", "📡 UserService bind request sent")
             true
         } catch (e: Exception) {
-            Log.e("ShizukuManager", "Failed to init local shell service", e)
+            Log.e("ShizukuManager", "Failed to bind UserService", e)
             _isServiceConnected.value = false
             false
         }
@@ -111,9 +175,17 @@ class ShizukuManager @Inject constructor(
      * 断开连接
      */
     fun unbindService() {
+        try {
+            userServiceArgs?.let { args ->
+                Shizuku.unbindUserService(args, serviceConnection, true)
+            }
+        } catch (e: Exception) {
+            Log.w("ShizukuManager", "Error unbinding service", e)
+        }
         userService = null
+        userServiceArgs = null
         _isServiceConnected.value = false
-        Log.d("ShizukuManager", "Disconnected from local shell service")
+        Log.d("ShizukuManager", "Disconnected from UserService")
     }
 
     /**

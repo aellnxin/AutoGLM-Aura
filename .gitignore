@@ -40,5 +40,5 @@ output.json
 
 # Local configuration
 local.properties
-# 个人apikeys,千万不能上传了.
+# 个人apikeys
 secrets.properties

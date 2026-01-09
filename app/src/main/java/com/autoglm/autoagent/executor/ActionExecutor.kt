@@ -118,9 +118,23 @@ class ShellActionExecutor(
         }
     }
     
-    override suspend fun pressBack(): Boolean = pressKey(4) // KEYCODE_BACK
+    override suspend fun pressBack(): Boolean = withContext(Dispatchers.IO) {
+        try {
+            connector.pressBack(displayId)
+        } catch (e: Exception) {
+            Log.e(TAG, "Back press failed", e)
+            false
+        }
+    }
     
-    override suspend fun pressHome(): Boolean = pressKey(3) // KEYCODE_HOME
+    override suspend fun pressHome(): Boolean = withContext(Dispatchers.IO) {
+        try {
+            connector.pressHome(displayId)
+        } catch (e: Exception) {
+            Log.e(TAG, "Home press failed", e)
+            false
+        }
+    }
     
     override suspend fun longPress(x: Float, y: Float): Boolean = withContext(Dispatchers.IO) {
         try {
@@ -209,8 +223,18 @@ class AccessibilityActionExecutor : ActionExecutor {
 }
 
 /**
- * 降级执行器管理器
- * 优先使用 Shell 服务，失败时自动降级到无障碍服务
+ * Shizuku 服务执行失败异常
+ * 当 Shizuku 模式下操作失败时抛出，用于中断任务并通知用户
+ */
+class ShizukuExecutionException(
+    message: String,
+    cause: Throwable? = null
+) : Exception(message, cause)
+
+/**
+ * 执行器管理器（无降级）
+ * 根据当前模式（Shell/Accessibility）选择执行器，不做自动降级
+ * Shell 模式异常时直接抛出 ShizukuExecutionException
  */
 @Singleton
 class FallbackActionExecutor @Inject constructor(
@@ -218,7 +242,7 @@ class FallbackActionExecutor @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
     companion object {
-        private const val TAG = "FallbackActionExecutor"
+        private const val TAG = "ActionExecutorManager"
     }
     
     private val _currentMode = MutableStateFlow(ExecutionMode.UNAVAILABLE)
@@ -227,7 +251,7 @@ class FallbackActionExecutor @Inject constructor(
     private var shellExecutor: ShellActionExecutor? = null
     private val accessibilityExecutor = AccessibilityActionExecutor()
     
-    // 状态栏通知回调
+    // 状态变更回调
     var onModeChanged: ((ExecutionMode, ExecutionMode) -> Unit)? = null
     
     // VirtualDisplay 支持
@@ -277,18 +301,11 @@ class FallbackActionExecutor @Inject constructor(
     }
     
     /**
-     * 获取当前可用的执行器
+     * 获取当前可用的执行器（不做降级）
      */
     private fun getExecutor(): ActionExecutor? {
-        // 动态刷新：如果当前不可用，尝试刷新一次以解决时序问题
+        // 如果当前不可用，尝试刷新一次
         if (_currentMode.value == ExecutionMode.UNAVAILABLE) {
-            Log.w(TAG, "Executor unavailable, attempting force reconnect...")
-            try {
-                // 尝试强制重连 Shell 服务
-                connector.ensureConnection()
-            } catch (e: Exception) {
-                Log.e(TAG, "Force reconnect failed", e)
-            }
             refreshMode()
         }
         
@@ -300,74 +317,53 @@ class FallbackActionExecutor @Inject constructor(
     }
     
     /**
-     * 执行操作，失败时自动降级
+     * 执行操作（无降级）
+     * Shell 模式失败时抛出 ShizukuExecutionException
      */
-    private suspend fun <T> executeWithFallback(
+    private suspend fun <T> execute(
         operation: String,
         action: suspend (ActionExecutor) -> T,
-        fallbackValue: T
+        failureValue: T
     ): T {
         val executor = getExecutor()
-        if (executor == null) {
-            Log.e(TAG, "$operation failed: No executor available")
-            return fallbackValue
-        }
+            ?: throw ShizukuExecutionException("$operation failed: No executor available (mode=${_currentMode.value})")
         
         return try {
             val result = action(executor)
             
-            // 如果 Shell 模式操作失败，尝试降级
+            // Shell 模式下，操作失败直接抛出异常
             if (result == false && _currentMode.value == ExecutionMode.SHELL) {
-                Log.w(TAG, "$operation failed in Shell mode, trying fallback")
-                
-                if (accessibilityExecutor.isAvailable()) {
-                    val previousMode = _currentMode.value
-                    _currentMode.value = ExecutionMode.ACCESSIBILITY
-                    onModeChanged?.invoke(previousMode, ExecutionMode.ACCESSIBILITY)
-                    
-                    @Suppress("UNCHECKED_CAST")
-                    return action(accessibilityExecutor)
-                }
+                throw ShizukuExecutionException("$operation failed in Shell mode on Display $currentDisplayId")
             }
             
             result
+        } catch (e: ShizukuExecutionException) {
+            throw e  // 重新抛出
         } catch (e: Exception) {
-            Log.e(TAG, "$operation exception, trying fallback", e)
-            
-            // 异常时尝试降级
-            if (_currentMode.value == ExecutionMode.SHELL && accessibilityExecutor.isAvailable()) {
-                val previousMode = _currentMode.value
-                _currentMode.value = ExecutionMode.ACCESSIBILITY
-                onModeChanged?.invoke(previousMode, ExecutionMode.ACCESSIBILITY)
-                
-                return try {
-                    action(accessibilityExecutor)
-                } catch (e2: Exception) {
-                    Log.e(TAG, "$operation fallback also failed", e2)
-                    fallbackValue
-                }
+            if (_currentMode.value == ExecutionMode.SHELL) {
+                throw ShizukuExecutionException("$operation exception in Shell mode", e)
             }
-            
-            fallbackValue
+            Log.e(TAG, "$operation failed in Accessibility mode", e)
+            failureValue
         }
     }
     
     // === 公开操作接口 ===
     
-    suspend fun tap(x: Float, y: Float): Boolean = executeWithFallback("Tap", { it.tap(x, y) }, false)
+    suspend fun tap(x: Float, y: Float): Boolean = execute("Tap", { it.tap(x, y) }, false)
     
     suspend fun scroll(x1: Float, y1: Float, x2: Float, y2: Float): Boolean = 
-        executeWithFallback("Scroll", { it.scroll(x1, y1, x2, y2) }, false)
+        execute("Scroll", { it.scroll(x1, y1, x2, y2) }, false)
     
-    suspend fun inputText(text: String): Boolean = executeWithFallback("InputText", { it.inputText(text) }, false)
+    suspend fun inputText(text: String): Boolean = execute("InputText", { it.inputText(text) }, false)
     
-    suspend fun pressBack(): Boolean = executeWithFallback("Back", { it.pressBack() }, false)
+    suspend fun pressBack(): Boolean = execute("Back", { it.pressBack() }, false)
     
-    suspend fun pressHome(): Boolean = executeWithFallback("Home", { it.pressHome() }, false)
+    suspend fun pressHome(): Boolean = execute("Home", { it.pressHome() }, false)
     
-    suspend fun longPress(x: Float, y: Float): Boolean = executeWithFallback("LongPress", { it.longPress(x, y) }, false)
+    suspend fun longPress(x: Float, y: Float): Boolean = execute("LongPress", { it.longPress(x, y) }, false)
     
-    suspend fun doubleTap(x: Float, y: Float): Boolean = executeWithFallback("DoubleTap", { it.doubleTap(x, y) }, false)
+    suspend fun doubleTap(x: Float, y: Float): Boolean = execute("DoubleTap", { it.doubleTap(x, y) }, false)
     
     /**
      * 检查是否有任何执行器可用
